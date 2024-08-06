@@ -2,7 +2,7 @@
 import torch
 
 
-class IncrementalPCAonGPU():
+class IncrementalPCA():
     """
     An implementation of Incremental Principal Components Analysis (IPCA) that leverages PyTorch for GPU acceleration.
 
@@ -25,9 +25,9 @@ class IncrementalPCAonGPU():
         self.copy = copy
         self.batch_size = batch_size
 
-        if self.device != "cpu":
+        if device != "cpu":
             assert torch.cuda.is_available(), f"CUDA is not available but device is {device}. Please set device='cpu' or install PyTorch with CUDA support."
-        self.device = torch.device(self.device)
+        self.device = torch.device(device)
 
         # Set n_components_ based on n_components if provided
         if n_components:
@@ -46,7 +46,7 @@ class IncrementalPCAonGPU():
         It also provides an option to create a copy of the tensor, which is useful when the input data should not be overwritten.
 
         Args:
-            X (Union[np.ndarray, torch.Tensor]): Input data which can be a numpy array or a PyTorch tensor.
+            X (torch.Tensor): Input data.
             dtype (torch.dtype, optional): Desired data type for the tensor. Defaults to torch.float32.
             copy (bool, optional): Whether to clone the tensor. If True, a new tensor is returned; otherwise, the original tensor 
                                    (or its device-transferred version) is returned. Defaults to True.
