@@ -2,7 +2,6 @@
 
 [![PyPI Version](https://img.shields.io/pypi/v/torch-incremental-pca.svg)](https://pypi.org/project/torch-incremental-pca/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://github.com/sirluk/torch-incremental-pca/actions/workflows/tests.yml/badge.svg)](https://github.com/sirluk/torch-incremental-pca/actions/workflows/tests.yml)
 
 This project provides a PyTorch implementation of the Incremental PCA algorithm, inspired by the `IncrementalPCA` class from scikit-learn and this repository: [PCAonGPU](https://github.com/dnhkng/PCAonGPU/tree/main) The repository has some shortcomings with regards to the precision of operations leading to vastly different results compared to the sklearn implemtation. The IncrementalPCA class in this repo produces outputs which are very close to the sklearn implementation with the added benefit of running on GPU.
 
