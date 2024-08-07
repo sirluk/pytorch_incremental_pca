@@ -1,4 +1,3 @@
-
 import torch
 
 
@@ -6,21 +5,23 @@ class IncrementalPCA:
     """
     An implementation of Incremental Principal Components Analysis (IPCA) that leverages PyTorch for GPU acceleration.
 
-    This class provides methods to fit the model on data incrementally in batches, and to transform new data 
+    This class provides methods to fit the model on data incrementally in batches, and to transform new data
     based on the principal components learned during the fitting process.
 
     Attributes:
-        n_components (int, optional): Number of components to keep. If `None`, it's set to the minimum of the 
+        n_components (int, optional): Number of components to keep. If `None`, it's set to the minimum of the
                                       number of samples and features. Defaults to None.
         copy (bool): If False, input data will be overwritten. Defaults to True.
-        batch_size (int, optional): The number of samples to use for each batch. If `None`, it's inferred from 
+        batch_size (int, optional): The number of samples to use for each batch. If `None`, it's inferred from
                                     the data and set to `5 * n_features`. Defaults to None.
         svd_driver (str, optional): name of the cuSOLVER method to be used for svd. This keyword argument only
-                                works on CUDA inputs. Available options are: None, gesvd, gesvdj, and gesvda. 
+                                works on CUDA inputs. Available options are: None, gesvd, gesvdj, and gesvda.
                                 Defaults to None.
     """
 
-    def __init__(self, n_components=None, *, copy=True, batch_size=None, svd_driver=None):
+    def __init__(
+        self, n_components=None, *, copy=True, batch_size=None, svd_driver=None
+    ):
         self.n_components = n_components
         self.copy = copy
         self.batch_size = batch_size
@@ -34,13 +35,13 @@ class IncrementalPCA:
         """
         Validates and converts the input data `X` to the appropriate tensor format.
 
-        This method ensures that the input data is in the form of a PyTorch tensor and resides on the correct device (CPU or GPU). 
+        This method ensures that the input data is in the form of a PyTorch tensor and resides on the correct device (CPU or GPU).
         It also provides an option to create a copy of the tensor, which is useful when the input data should not be overwritten.
 
         Args:
             X (torch.Tensor): Input data.
             dtype (torch.dtype, optional): Desired data type for the tensor. Defaults to torch.float32.
-            copy (bool, optional): Whether to clone the tensor. If True, a new tensor is returned; otherwise, the original tensor 
+            copy (bool, optional): Whether to clone the tensor. If True, a new tensor is returned; otherwise, the original tensor
                                    (or its device-transferred version) is returned. Defaults to True.
 
         Returns:
@@ -48,12 +49,12 @@ class IncrementalPCA:
         """
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=dtype)
-        
+
         if copy:
             X = X.clone()
         elif X.dtype != dtype:
             X = X.to(dtype)
-        
+
         return X
 
     @staticmethod
@@ -72,10 +73,14 @@ class IncrementalPCA:
         """
         if X.shape[0] == 0:
             return last_mean, last_variance, last_sample_count
-        
+
         if last_sample_count > 0:
-            assert last_mean is not None, "last_mean should not be None if last_sample_count > 0."
-            assert last_variance is not None, "last_variance should not be None if last_sample_count > 0."
+            assert (
+                last_mean is not None
+            ), "last_mean should not be None if last_sample_count > 0."
+            assert (
+                last_variance is not None
+            ), "last_variance should not be None if last_sample_count > 0."
 
         new_sample_count = torch.tensor([X.shape[0]], device=X.device)
         updated_sample_count = last_sample_count + new_sample_count
@@ -86,7 +91,7 @@ class IncrementalPCA:
             last_sum = last_mean * last_sample_count
 
         new_sum = X.sum(dim=0, dtype=torch.float64)
-        
+
         updated_mean = (last_sum + new_sum) / updated_sample_count
 
         T = new_sum / new_sample_count
@@ -135,7 +140,7 @@ class IncrementalPCA:
         u *= signs.view(1, -1)
         v *= signs.view(-1, 1)
         return u, v
-    
+
     def fit(self, X, check_input=True):
         """
         Fits the model with data `X` using minibatches of size `batch_size`.
@@ -181,7 +186,7 @@ class IncrementalPCA:
             self.n_components_ = min(n_samples, n_features)
 
         # Initialize attributes to avoid errors during the first call to partial_fit
-        if first_pass:  
+        if first_pass:
             self.mean_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
             self.var_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
             self.n_samples_seen_ = torch.tensor([0], device=X.device)
@@ -195,7 +200,9 @@ class IncrementalPCA:
         else:
             col_batch_mean = torch.mean(X, dim=0)
             X -= col_batch_mean
-            mean_correction_factor = torch.sqrt((self.n_samples_seen_.double() / n_total_samples) * n_samples)
+            mean_correction_factor = torch.sqrt(
+                (self.n_samples_seen_.double() / n_total_samples) * n_samples
+            )
             mean_correction = mean_correction_factor * (self.mean_ - col_batch_mean)
             X = torch.vstack(
                 (
