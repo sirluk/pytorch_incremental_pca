@@ -2,7 +2,7 @@
 import torch
 
 
-class IncrementalPCA():
+class IncrementalPCA:
     """
     An implementation of Incremental Principal Components Analysis (IPCA) that leverages PyTorch for GPU acceleration.
 
@@ -12,31 +12,23 @@ class IncrementalPCA():
     Attributes:
         n_components (int, optional): Number of components to keep. If `None`, it's set to the minimum of the 
                                       number of samples and features. Defaults to None.
-        whiten (bool): When True, the `components_` vectors are divided to ensure uncorrelated outputs with 
-                       unit component-wise variances. Defaults to False.
         copy (bool): If False, input data will be overwritten. Defaults to True.
         batch_size (int, optional): The number of samples to use for each batch. If `None`, it's inferred from 
                                     the data and set to `5 * n_features`. Defaults to None.
+        svd_driver (str, optional): name of the cuSOLVER method to be used for svd. This keyword argument only
+                                works on CUDA inputs. Available options are: None, gesvd, gesvdj, and gesvda. 
+                                Defaults to None.
     """
 
-    def __init__(self, n_components=None, *, whiten=False, copy=True, batch_size=None, device="cpu"):
+    def __init__(self, n_components=None, *, copy=True, batch_size=None, svd_driver=None):
         self.n_components = n_components
-        self.whiten = whiten
         self.copy = copy
         self.batch_size = batch_size
-
-        if device != "cpu":
-            assert torch.cuda.is_available(), f"CUDA is not available but device is {device}. Please set device='cpu' or install PyTorch with CUDA support."
-        self.device = torch.device(device)
+        self.svd_driver = svd_driver
 
         # Set n_components_ based on n_components if provided
         if n_components:
             self.n_components_ = n_components
-
-        # Initialize attributes to avoid errors during the first call to partial_fit
-        self.mean_ = None  # Will be initialized properly in partial_fit based on data dimensions
-        self.var_ = None  # Will be initialized properly in partial_fit based on data dimensions
-        self.n_samples_seen_ = torch.tensor([0], device=self.device)
 
     def _validate_data(self, X, dtype=torch.float32, copy=True):
         """
@@ -55,11 +47,13 @@ class IncrementalPCA():
             torch.Tensor: Validated and possibly copied tensor residing on the specified device.
         """
         if not isinstance(X, torch.Tensor):
-            X = torch.tensor(X, dtype=dtype).to(self.device)
-        elif X.device != self.device:
-            X = X.to(self.device)
+            X = torch.tensor(X, dtype=dtype)
+        
         if copy:
             X = X.clone()
+        elif X.dtype != dtype:
+            X = X.to(dtype)
+        
         return X
 
     @staticmethod
@@ -183,18 +177,20 @@ class IncrementalPCA():
         if check_input:
             X = self._validate_data(X)
         n_samples, n_features = X.shape
-
-        if first_pass:
-            self.components_ = None
         if self.n_components is None:
             self.n_components_ = min(n_samples, n_features)
+
+        # Initialize attributes to avoid errors during the first call to partial_fit
+        if first_pass:  
+            self.mean_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
+            self.var_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
+            self.n_samples_seen_ = torch.tensor([0], device=X.device)
 
         col_mean, col_var, n_total_samples = self._incremental_mean_and_var(
             X, self.mean_, self.var_, self.n_samples_seen_
         )
 
-        # Whitening
-        if self.n_samples_seen_ == 0:
+        if first_pass:
             X -= col_mean
         else:
             col_batch_mean = torch.mean(X, dim=0)
@@ -209,7 +205,7 @@ class IncrementalPCA():
                 )
             )
 
-        U, S, Vt = torch.linalg.svd(X, full_matrices=False, driver="gesvd")
+        U, S, Vt = torch.linalg.svd(X, full_matrices=False, driver=self.svd_driver)
         U, Vt = self._svd_flip(U, Vt, u_based_decision=False)
         explained_variance = S**2 / (n_total_samples - 1)
         explained_variance_ratio = S**2 / torch.sum(col_var * n_total_samples)
@@ -224,7 +220,7 @@ class IncrementalPCA():
         if self.n_components_ not in (n_samples, n_features):
             self.noise_variance_ = explained_variance[self.n_components_ :].mean()
         else:
-            self.noise_variance_ = torch.tensor(0.0, device=self.device)
+            self.noise_variance_ = torch.tensor(0.0, device=X.device)
         return self
 
     def transform(self, X):
@@ -239,6 +235,5 @@ class IncrementalPCA():
         Returns:
             torch.Tensor: Transformed data tensor with shape (n_samples, n_components).
         """
-        X = X.to(self.device)
         X -= self.mean_
         return torch.mm(X, self.components_.T)
