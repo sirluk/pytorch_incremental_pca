@@ -31,7 +31,7 @@ class IncrementalPCA:
         if n_components:
             self.n_components_ = n_components
 
-    def _validate_data(self, X, dtype=torch.float32, copy=True):
+    def _validate_data(self, X, dtype=torch.float32):
         """
         Validates and converts the input data `X` to the appropriate tensor format.
 
@@ -49,10 +49,10 @@ class IncrementalPCA:
         """
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=dtype)
-
-        if copy:
+        elif self.copy:
             X = X.clone()
-        elif X.dtype != dtype:
+
+        if X.dtype != dtype:
             X = X.to(dtype)
 
         return X
