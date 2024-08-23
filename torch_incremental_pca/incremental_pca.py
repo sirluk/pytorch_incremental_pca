@@ -1,4 +1,8 @@
 import torch
+import warnings
+from functools import partial
+
+from typing import Optional
 
 
 class IncrementalPCA:
@@ -10,26 +14,51 @@ class IncrementalPCA:
 
     Attributes:
         n_components (int, optional): Number of components to keep. If `None`, it's set to the minimum of the
-                                      number of samples and features. Defaults to None.
+                                number of samples and features. Defaults to None.
         copy (bool): If False, input data will be overwritten. Defaults to True.
-        batch_size (int, optional): The number of samples to use for each batch. If `None`, it's inferred from
-                                    the data and set to `5 * n_features`. Defaults to None.
-        svd_driver (str, optional): name of the cuSOLVER method to be used for svd. This keyword argument only
-                                works on CUDA inputs. Available options are: None, gesvd, gesvdj, and gesvda.
-                                Defaults to None.
+        batch_size (int, optional): The number of samples to use for each batch. Only needed if self.fit is called.
+                                If `None`, it's inferred from the data and set to `5 * n_features`. Defaults to None.
+        svd_driver (str, optional): name of the cuSOLVER method to be used for torch.linalg.svd. This keyword 
+                                argument only works on CUDA inputs. Available options are: None, gesvd, gesvdj,
+                                and gesvda. Defaults to None.
+        lowrank (bool, optional): Whether to use torch.svd_lowrank instead of torch.linalg.svd which can be faster.
+                                Defaults to False.
+        lowrank_q (int, optional): For an adequate approximation of n_components, this parameter defaults to 
+                                n_components * 2.
+        lowrank_niter (int, optional): Number of subspace iterations to conduct for torch.svd_lowrank.
+                                Defaults to 4. 
     """
 
     def __init__(
-        self, n_components=None, *, copy=True, batch_size=None, svd_driver=None
+        self,
+        n_components: Optional[int] = None,
+        copy: Optional[bool] = True,
+        batch_size: Optional[int] = None,
+        svd_driver: Optional[str] = None,
+        lowrank: bool = False,
+        lowrank_q: Optional[int] = None,
+        lowrank_niter: int = 4
     ):
-        self.n_components = n_components
+        self.n_components_ = n_components
         self.copy = copy
         self.batch_size = batch_size
-        self.svd_driver = svd_driver
+        self.lowrank = lowrank
 
-        # Set n_components_ based on n_components if provided
-        if n_components:
-            self.n_components_ = n_components
+        if lowrank:
+            if lowrank_q is None:
+                warnings.warn("lowrank=True but lowrank_q is not set. Defaulting to n_components * 2.", Warning)
+                lowrank_q = n_components * 2
+            else:
+                assert lowrank_q >= n_components, "lowrank_q must be greater than or equal to n_components."
+            
+            def svd_fn(X):
+                U, S, V = torch.svd_lowrank(X, q=lowrank_q, niter=lowrank_niter)
+                return U, S, V.mH # V is returned as a conjugate transpose
+            self.svd_fn = svd_fn
+
+        else:
+            self.svd_fn = partial(torch.linalg.svd, full_matrices=False, driver=svd_driver)
+        
 
     def _validate_data(self, X, dtype=torch.float32):
         """
@@ -137,7 +166,7 @@ class IncrementalPCA:
         else:
             max_abs_rows = torch.argmax(torch.abs(v), dim=1)
             signs = torch.sign(v[range(v.shape[0]), max_abs_rows])
-        u *= signs.view(1, -1)
+        u *= signs[:u.shape[1]].view(1, -1)
         v *= signs.view(-1, 1)
         return u, v
 
@@ -182,14 +211,14 @@ class IncrementalPCA:
         if check_input:
             X = self._validate_data(X)
         n_samples, n_features = X.shape
-        if self.n_components is None:
-            self.n_components_ = min(n_samples, n_features)
 
         # Initialize attributes to avoid errors during the first call to partial_fit
         if first_pass:
             self.mean_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
             self.var_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
             self.n_samples_seen_ = torch.tensor([0], device=X.device)
+            if not self.n_components_:
+                self.n_components_ = min(n_samples, n_features)
 
         col_mean, col_var, n_total_samples = self._incremental_mean_and_var(
             X, self.mean_, self.var_, self.n_samples_seen_
@@ -212,20 +241,20 @@ class IncrementalPCA:
                 )
             )
 
-        U, S, Vt = torch.linalg.svd(X, full_matrices=False, driver=self.svd_driver)
+        U, S, Vt = self.svd_fn(X)
         U, Vt = self._svd_flip(U, Vt, u_based_decision=False)
         explained_variance = S**2 / (n_total_samples - 1)
         explained_variance_ratio = S**2 / torch.sum(col_var * n_total_samples)
 
         self.n_samples_seen_ = n_total_samples
-        self.components_ = Vt[: self.n_components_]
-        self.singular_values_ = S[: self.n_components_]
+        self.components_ = Vt[:self.n_components_]
+        self.singular_values_ = S[:self.n_components_]
         self.mean_ = col_mean
         self.var_ = col_var
-        self.explained_variance_ = explained_variance[: self.n_components_]
-        self.explained_variance_ratio_ = explained_variance_ratio[: self.n_components_]
+        self.explained_variance_ = explained_variance[:self.n_components_]
+        self.explained_variance_ratio_ = explained_variance_ratio[:self.n_components_]
         if self.n_components_ not in (n_samples, n_features):
-            self.noise_variance_ = explained_variance[self.n_components_ :].mean()
+            self.noise_variance_ = explained_variance[self.n_components_:].mean()
         else:
             self.noise_variance_ = torch.tensor(0.0, device=X.device)
         return self
