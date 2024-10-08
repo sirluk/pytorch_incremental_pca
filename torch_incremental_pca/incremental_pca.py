@@ -1,5 +1,4 @@
 import torch
-import warnings
 from functools import partial
 
 from typing import Optional
@@ -42,39 +41,31 @@ class IncrementalPCA:
         self.n_components_ = n_components
         self.copy = copy
         self.batch_size = batch_size
-        self.lowrank = lowrank
 
         if lowrank:
             if lowrank_q is None:
-                warnings.warn("lowrank=True but lowrank_q is not set. Defaulting to n_components * 2.", Warning)
+                assert n_components is not None, "n_components must be specified when using lowrank mode with lowrank_q=None."
                 lowrank_q = n_components * 2
-            else:
-                assert lowrank_q >= n_components, "lowrank_q must be greater than or equal to n_components."
-            
+            assert lowrank_q >= n_components, "lowrank_q must be greater than or equal to n_components."
             def svd_fn(X):
                 U, S, V = torch.svd_lowrank(X, q=lowrank_q, niter=lowrank_niter)
                 return U, S, V.mH # V is returned as a conjugate transpose
-            self.svd_fn = svd_fn
+            self._svd_fn = svd_fn
 
         else:
-            self.svd_fn = partial(torch.linalg.svd, full_matrices=False, driver=svd_driver)
+            self._svd_fn = partial(torch.linalg.svd, full_matrices=False, driver=svd_driver)
         
 
-    def _validate_data(self, X, dtype=torch.float32):
+    def _validate_data(self, X, dtype=torch.float32) -> torch.Tensor:
         """
         Validates and converts the input data `X` to the appropriate tensor format.
-
-        This method ensures that the input data is in the form of a PyTorch tensor and resides on the correct device (CPU or GPU).
-        It also provides an option to create a copy of the tensor, which is useful when the input data should not be overwritten.
 
         Args:
             X (torch.Tensor): Input data.
             dtype (torch.dtype, optional): Desired data type for the tensor. Defaults to torch.float32.
-            copy (bool, optional): Whether to clone the tensor. If True, a new tensor is returned; otherwise, the original tensor
-                                   (or its device-transferred version) is returned. Defaults to True.
 
         Returns:
-            torch.Tensor: Validated and possibly copied tensor residing on the specified device.
+            torch.Tensor: Converted to appropriate format.
         """
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=dtype)
@@ -87,7 +78,7 @@ class IncrementalPCA:
         return X
 
     @staticmethod
-    def _incremental_mean_and_var(X, last_mean, last_variance, last_sample_count):
+    def _incremental_mean_and_var(X, last_mean, last_variance, last_sample_count) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Computes the incremental mean and variance for the data `X`.
 
@@ -98,7 +89,7 @@ class IncrementalPCA:
             last_sample_count (torch.Tensor): The count tensor of samples processed before the current batch.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, int]: Updated mean, variance tensors, and total sample count.
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Updated mean, variance tensors, and total sample count.
         """
         if X.shape[0] == 0:
             return last_mean, last_variance, last_sample_count
@@ -146,7 +137,7 @@ class IncrementalPCA:
         return updated_mean, updated_variance, updated_sample_count
 
     @staticmethod
-    def _svd_flip(u, v, u_based_decision=True):
+    def _svd_flip(u, v, u_based_decision=True) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Adjusts the signs of the singular vectors from the SVD decomposition for deterministic output.
 
@@ -158,7 +149,7 @@ class IncrementalPCA:
             u_based_decision (bool, optional): If True, uses the left singular vectors to determine the sign flipping. Defaults to True.
 
         Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Adjusted left and right singular vectors tensors.
+            tuple[torch.Tensor, torch.Tensor]: Adjusted left and right singular vectors tensors.
         """
         if u_based_decision:
             max_abs_cols = torch.argmax(torch.abs(u), dim=0)
@@ -176,9 +167,10 @@ class IncrementalPCA:
 
         Args:
             X (torch.Tensor): The input data tensor with shape (n_samples, n_features).
+            check_input (bool, optional): If True, validates the input. Defaults to True.
 
         Returns:
-            IncrementalPCAGPU: The fitted IPCA model.
+            IncrementalPCA: The fitted IPCA model.
         """
         if check_input:
             X = self._validate_data(X)
@@ -204,7 +196,7 @@ class IncrementalPCA:
             check_input (bool, optional): If True, validates the input. Defaults to True.
 
         Returns:
-            IncrementalPCAGPU: The updated IPCA model after processing the batch.
+            IncrementalPCA: The updated IPCA model after processing the batch.
         """
         first_pass = not hasattr(self, "components_")
 
@@ -241,7 +233,7 @@ class IncrementalPCA:
                 )
             )
 
-        U, S, Vt = self.svd_fn(X)
+        U, S, Vt = self._svd_fn(X)
         U, Vt = self._svd_flip(U, Vt, u_based_decision=False)
         explained_variance = S**2 / (n_total_samples - 1)
         explained_variance_ratio = S**2 / torch.sum(col_var * n_total_samples)
@@ -259,7 +251,7 @@ class IncrementalPCA:
             self.noise_variance_ = torch.tensor(0.0, device=X.device)
         return self
 
-    def transform(self, X):
+    def transform(self, X) -> torch.Tensor:
         """
         Applies dimensionality reduction to `X`.
 
