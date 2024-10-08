@@ -1,7 +1,7 @@
 import torch
 from functools import partial
 
-from typing import Optional
+from typing import Optional, Tuple
 
 
 class IncrementalPCA:
@@ -78,7 +78,7 @@ class IncrementalPCA:
         return X
 
     @staticmethod
-    def _incremental_mean_and_var(X, last_mean, last_variance, last_sample_count) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _incremental_mean_and_var(X, last_mean, last_variance, last_sample_count) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Computes the incremental mean and variance for the data `X`.
 
@@ -89,7 +89,7 @@ class IncrementalPCA:
             last_sample_count (torch.Tensor): The count tensor of samples processed before the current batch.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Updated mean, variance tensors, and total sample count.
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Updated mean, variance tensors, and total sample count.
         """
         if X.shape[0] == 0:
             return last_mean, last_variance, last_sample_count
@@ -137,7 +137,7 @@ class IncrementalPCA:
         return updated_mean, updated_variance, updated_sample_count
 
     @staticmethod
-    def _svd_flip(u, v, u_based_decision=True) -> tuple[torch.Tensor, torch.Tensor]:
+    def _svd_flip(u, v, u_based_decision=True) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Adjusts the signs of the singular vectors from the SVD decomposition for deterministic output.
 
@@ -149,7 +149,7 @@ class IncrementalPCA:
             u_based_decision (bool, optional): If True, uses the left singular vectors to determine the sign flipping. Defaults to True.
 
         Returns:
-            tuple[torch.Tensor, torch.Tensor]: Adjusted left and right singular vectors tensors.
+            Tuple[torch.Tensor, torch.Tensor]: Adjusted left and right singular vectors tensors.
         """
         if u_based_decision:
             max_abs_cols = torch.argmax(torch.abs(u), dim=0)
