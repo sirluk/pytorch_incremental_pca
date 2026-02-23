@@ -10,7 +10,7 @@ authors = [
 ]
 description = "A PyTorch implementation of Incremental PCA"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 dependencies = ["torch", "numpy"]
 
 classifiers = [
