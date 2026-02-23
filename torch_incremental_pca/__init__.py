@@ -1,1 +1,1 @@
-from torch_incremental_pca.incremental_pca import IncrementalPCA
+from torch_incremental_pca.incremental_pca import IncrementalPCA  # noqa: F401
