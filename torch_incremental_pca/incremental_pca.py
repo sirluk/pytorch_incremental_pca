@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import contextlib
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -5,55 +9,78 @@ import torch
 
 class IncrementalPCA:
     """
-    An implementation of Incremental Principal Components Analysis (IPCA) that leverages PyTorch for GPU acceleration.
-    Adapted from https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/decomposition/_incremental_pca.py
+    An implementation of Incremental Principal Components Analysis (IPCA) that leverages
+    PyTorch for GPU acceleration.
+    Adapted from
+    https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/decomposition/_incremental_pca.py
 
-    This class provides methods to fit the model on data incrementally in batches, and to transform new data based on
-    the principal components learned during the fitting process.
+    This class provides methods to fit the model on data incrementally in batches,
+    and to transform new data based on the principal components learned during the
+    fitting process.
 
     Three SVD backends are available, selectable via the `lowrank` and `gram` flags:
 
     - **Full SVD** (default): Uses `torch.linalg.svd`. Exact but uses Householder
-      bidiagonalization which is inherently sequential and underutilizes GPU parallelism.
+      bidiagonalization which is inherently sequential and underutilizes GPU
+      parallelism.
     - **Low-rank SVD** (`lowrank=True`): Uses `torch.svd_lowrank` (randomized SVD).
       Faster for very large matrices where `n_components << min(n_samples, n_features)`,
-      but involves multiple power iterations that can be slower for moderate-sized matrices.
+      but involves multiple power iterations that can be slower for moderate-sized
+      matrices.
     - **Gram eigendecomposition** (`gram=True`): Computes `G = X @ X.T` (a GEMM) then
-      `torch.linalg.eigh(G)` to recover singular values/vectors. Mathematically equivalent
-      to full SVD but significantly faster on GPU because it replaces sequential Householder
-      reflections with highly-parallelizable matrix multiplications. Recommended when the
-      augmented matrix is wide (rows < cols), which is the typical case in incremental PCA
-      when `n_components + batch_size < n_features`.
+      `torch.linalg.eigh(G)` to recover singular values/vectors. Mathematically
+      equivalent to full SVD but significantly faster on GPU because it replaces
+      sequential Householder reflections with highly-parallelizable matrix
+      multiplications. Recommended when the augmented matrix is wide (rows < cols),
+      which is the typical case in incremental PCA when
+      `n_components + batch_size < n_features`.
 
     Args:
-        n_components (int, optional): Number of components to keep. If `None`, it's set to the minimum of the
-            number of samples and features. Defaults to None.
-        copy (bool): If False, input data will be overwritten. Defaults to True.
-        batch_size (int, optional): The number of samples to use for each batch. Only needed if self.fit is called.
-            If `None`, it's inferred from the data and set to `5 * n_features`. Defaults to None.
-        svd_driver (str, optional): name of the cuSOLVER method to be used for torch.linalg.svd. This keyword
-            argument only works on CUDA inputs. Available options are: None, gesvd, gesvdj, and gesvda. Defaults to
-            None.
-        lowrank (bool, optional): Whether to use torch.svd_lowrank instead of torch.linalg.svd which can be faster.
-            Mutually exclusive with `gram`. Defaults to False.
-        lowrank_q (int, optional): For an adequate approximation of n_components, this parameter defaults to
-            n_components * 2.
-        lowrank_niter (int, optional): Number of subspace iterations to conduct for torch.svd_lowrank.
-            Defaults to 4.
-        lowrank_seed (int, optional): Seed for making results of torch.svd_lowrank reproducible.
+        n_components (int, optional): Number of components to keep. If `None`, it's
+            set to the minimum of the number of samples and features. Defaults to None.
+        copy (bool): If False, this class may overwrite (mutate) input data in-place
+            for performance (currently only on the first `partial_fit`, during
+            centering). Defaults to True.
+        batch_size (int, optional): The number of samples to use for each batch.
+            Only needed if self.fit is called. If `None`, it's inferred from the data
+            and set to `5 * n_features`. Defaults to None.
+        svd_driver (str, optional): name of the cuSOLVER method to be used for
+            torch.linalg.svd. This keyword argument only works on CUDA inputs. Available
+            options are: None, gesvd, gesvdj, and gesvda. Defaults to None.
+        lowrank (bool, optional): Whether to use torch.svd_lowrank instead of
+            torch.linalg.svd which can be faster. Mutually exclusive with `gram`.
+            Defaults to False.
+        lowrank_q (int, optional): For an adequate approximation of n_components,
+            this parameter defaults to n_components * 2.
+        lowrank_niter (int, optional): Number of subspace iterations to conduct for
+            torch.svd_lowrank. Defaults to 4.
+        lowrank_seed (int, optional): Seed for making results of torch.svd_lowrank
+            reproducible.
         gram (bool, optional): Whether to use gram-matrix eigendecomposition instead of
             torch.linalg.svd. For wide matrices (rows < cols), this computes G = X @ X.T
             followed by torch.linalg.eigh(G) and recovers singular vectors via
-            Vt = U.T @ X / S. Mathematically equivalent to full SVD but significantly faster
-            on GPU because it uses GEMM operations instead of sequential Householder
-            reflections. Falls back to full SVD when the matrix is tall (rows > cols).
-            Mutually exclusive with `lowrank`. Defaults to False.
+            Vt = U.T @ X / S. Mathematically equivalent to full SVD but significantly
+            faster on GPU because it uses GEMM operations instead of sequential
+            Householder reflections. Falls back to full SVD when the matrix is tall
+            (rows > cols). Mutually exclusive with `lowrank`. Defaults to False.
+        stats_dtype (torch.dtype, optional): Data type to use for computing statistics
+            (mean and variance). Defaults to None.
+        ensure_contiguous (bool): Whether to enforce contiguous memory layout for inputs
+            Defaults to True.
+        gram_eps (float): Small epsilon value to avoid division by zero when computing
+            inverse of singular values in gram mode. Defaults to 1e-7.
+        allow_tf32 (bool, optional): Whether to allow TensorFloat-32 (TF32) execution
+            on Ampere+ GPUs for matrix multiplications. Defaults to None.
+        matmul_precision (str, optional): Matmul precision to use ("highest", "high",
+            or "medium"). Requires PyTorch >= 2.0. Defaults to None.
+        deterministic_flip (bool): Whether to apply SVD sign flipping deterministically.
+            Defaults to True.
     """
 
     def __init__(
         self,
         n_components: Optional[int] = None,
-        copy: Optional[bool] = True,
+        copy: bool = True,
         batch_size: Optional[int] = None,
         svd_driver: Optional[str] = None,
         lowrank: bool = False,
@@ -61,32 +88,103 @@ class IncrementalPCA:
         lowrank_niter: int = 4,
         lowrank_seed: Optional[int] = None,
         gram: bool = False,
+        # New knobs
+        stats_dtype: Optional[torch.dtype] = None,
+        ensure_contiguous: bool = True,
+        gram_eps: float = 1e-7,
+        # Perf knobs
+        allow_tf32: Optional[bool] = None,
+        matmul_precision: Optional[
+            str
+        ] = None,  # "highest" | "high" | "medium" (torch>=2.0)
+        deterministic_flip: bool = True,
     ):
         self.n_components = n_components
         self.copy = copy
         self.batch_size = batch_size
         self.svd_driver = svd_driver
+
         self.lowrank = lowrank
         self.lowrank_q = lowrank_q
         self.lowrank_niter = lowrank_niter
         self.lowrank_seed = lowrank_seed
+
         self.gram = gram
+        self.stats_dtype = stats_dtype
+        self.ensure_contiguous = ensure_contiguous
+        self.gram_eps = gram_eps
+
+        self.allow_tf32 = allow_tf32
+        self.matmul_precision = matmul_precision
+        self.deterministic_flip = deterministic_flip
 
         self.n_features_ = None
 
-        if self.lowrank and self.gram:
-            raise ValueError("lowrank and gram are mutually exclusive. Set only one to True.")
+        # Workspace for augmented matrix to reduce allocations
+        self._x_aug_work: Optional[torch.Tensor] = None
 
+        if self.lowrank and self.gram:
+            raise ValueError(
+                "lowrank and gram are mutually exclusive. Set only one to True."
+            )
         if self.lowrank:
             self._validate_lowrank_params()
 
     def _validate_lowrank_params(self):
         if self.lowrank_q is None:
             if self.n_components is None:
-                raise ValueError("n_components must be specified when using lowrank mode with lowrank_q=None.")
+                raise ValueError(
+                    "n_components must be specified when using lowrank mode "
+                    "with lowrank_q=None."
+                )
             self.lowrank_q = self.n_components * 2
-        elif self.lowrank_q < self.n_components:
-            raise ValueError("lowrank_q must be greater than or equal to n_components.")
+        elif self.n_components is not None and self.lowrank_q < self.n_components:
+            raise ValueError("lowrank_q must be >= n_components.")
+
+    @contextlib.contextmanager
+    def _matmul_context(self):
+        # Scoped TF32 / matmul precision toggles; restored afterwards.
+        old_tf32 = None
+        old_cudnn_tf32 = None
+        old_prec = None
+        changed_tf32 = self.allow_tf32 is not None and torch.cuda.is_available()
+        changed_prec = self.matmul_precision is not None and hasattr(
+            torch, "set_float32_matmul_precision"
+        )
+
+        try:
+            if changed_tf32:
+                old_tf32 = torch.backends.cuda.matmul.allow_tf32
+                torch.backends.cuda.matmul.allow_tf32 = bool(self.allow_tf32)
+                # cudnn TF32 can matter for some ops; harmless to mirror
+                if hasattr(torch.backends, "cudnn") and hasattr(
+                    torch.backends.cudnn, "allow_tf32"
+                ):
+                    old_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+                    torch.backends.cudnn.allow_tf32 = bool(self.allow_tf32)
+
+            if changed_prec:
+                # torch.get_float32_matmul_precision exists on modern PyTorch
+                if hasattr(torch, "get_float32_matmul_precision"):
+                    old_prec = torch.get_float32_matmul_precision()
+                torch.set_float32_matmul_precision(self.matmul_precision)
+
+            yield
+        finally:
+            if (
+                changed_prec
+                and old_prec is not None
+                and hasattr(torch, "set_float32_matmul_precision")
+            ):
+                torch.set_float32_matmul_precision(old_prec)
+            if changed_tf32 and old_tf32 is not None:
+                torch.backends.cuda.matmul.allow_tf32 = old_tf32
+            if (
+                changed_tf32
+                and old_cudnn_tf32 is not None
+                and hasattr(torch.backends, "cudnn")
+            ):
+                torch.backends.cudnn.allow_tf32 = old_cudnn_tf32
 
     def _svd_fn_full(self, X):
         return torch.linalg.svd(X, full_matrices=False, driver=self.svd_driver)
@@ -99,202 +197,232 @@ class IncrementalPCA:
             U, S, V = torch.svd_lowrank(X, q=self.lowrank_q, niter=self.lowrank_niter)
             return U, S, V.mH
 
-    def _svd_fn_gram(self, X):
-        """Compute SVD via gram-matrix eigendecomposition.
-
-        For wide matrices (m < D), instead of running the sequential Householder
-        bidiagonalization used by torch.linalg.svd, this method computes the
-        small gram matrix G = X @ X.T (shape (m, m)) using a single GEMM,
-        then finds its eigendecomposition via torch.linalg.eigh. The right
-        singular vectors are recovered as Vt = diag(1/S) @ U.T @ X, which is
-        another GEMM.
-
-        This is mathematically equivalent to full SVD but significantly faster on
-        GPU because GEMM operations achieve much higher hardware utilization than
-        the sequential Householder reflections used by torch.linalg.svd.
-
-        Falls back to full SVD when the matrix is tall (m > D).
-
-        Args:
-            X (torch.Tensor): Input matrix of shape (m, D).
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: (U, S, Vt) where
-                U is (m, m), S is (m,), Vt is (m, D).
+    def _svd_fn_gram_topk(self, X):
+        """
+        Wide-matrix fast path: G = X @ X.T then eigh(G), recover Vt.
+        Avoids flipping full eigensystem; slices only top-k.
+        Also fuses invS scaling into the small (k x m) factor before GEMM.
         """
         m, D = X.shape
         if m > D:
-            return self._svd_fn_full(X)
-        G = X @ X.mT  # (m, m) — GEMM
-        evals, evecs = torch.linalg.eigh(G)  # ascending order
-        # Flip to descending order (largest eigenvalues first)
-        evals = evals.flip(0)
-        evecs = evecs.flip(1)
-        S = torch.sqrt(evals.clamp(min=0))
-        # Recover right singular vectors: Vt = diag(1/S) @ U.T @ X
-        valid = S > 1e-7
-        Vt = torch.zeros(m, D, dtype=X.dtype, device=X.device)
-        Vt[valid] = (evecs[:, valid].mT @ X) / S[valid].unsqueeze(1)
-        return evecs, S, Vt
+            U, S, Vt = self._svd_fn_full(X)
+            return U, S, Vt, None, None
 
-    def _validate_data(self, X) -> torch.Tensor:
-        """
-        Validates and converts the input data `X` to the appropriate tensor format.
+        k = min(self.n_components or m, m)
 
-        Args:
-            X (torch.Tensor): Input data.
+        # G is (m, m)
+        G = X @ X.mT
+        evals, evecs = torch.linalg.eigh(G)  # ascending
 
-        Returns:
-            torch.Tensor: Converted to appropriate format.
-        """
-        valid_dtypes = [torch.float32, torch.float64]
+        # Take largest-k (from the end) then flip just those to descending
+        evals_k = evals[-k:].flip(0)  # (k,)
+        U_k = evecs[:, -k:].flip(1)  # (m, k)
+
+        S_k = torch.sqrt(evals_k.clamp(min=0))
+
+        invS = (S_k.clamp(min=self.gram_eps)).reciprocal()  # (k,)
+
+        # Fuse scaling into small factor (k x m) then GEMM to get (k x D)
+        # Vt_k = diag(1/S) @ U^T @ X
+        Vt_k = (invS[:, None] * U_k.mT) @ X
+
+        tail_count = m - k
+        if tail_count > 0:
+            # tail are the smallest m-k eigenvalues (ascending => evals[:-k])
+            tail_ss = evals[:-k].clamp(min=0).sum()
+        else:
+            tail_ss = torch.zeros((), device=X.device, dtype=X.dtype)
+
+        return U_k, S_k, Vt_k, tail_ss, tail_count
+
+    def _validate_fit_batch(self, X) -> torch.Tensor:
+        valid_dtypes = (torch.float32, torch.float64)
 
         if not isinstance(X, torch.Tensor):
             X = torch.tensor(X, dtype=torch.float32)
-        elif self.copy:
-            X = X.clone()
+        # NOTE: We no longer clone for copy=True. Inputs are only modified when
+        # copy=False (first-pass centering).
+
+        if self.ensure_contiguous and not X.is_contiguous():
+            X = X.contiguous()
 
         n_samples, n_features = X.shape
-        if self.n_components is None:
-            pass
-        elif self.n_components > n_features:
-            raise ValueError(
-                f"n_components={self.n_components} invalid for n_features={n_features}, "
-                "need more rows than columns for IncrementalPCA processing."
-            )
-        elif self.n_components > n_samples:
-            raise ValueError(
-                f"n_components={self.n_components} must be less or equal to the batch number of samples {n_samples}"
-            )
+        if self.n_components is not None:
+            if self.n_components > n_features:
+                raise ValueError(
+                    f"n_components={self.n_components} invalid "
+                    f"for n_features={n_features}."
+                )
+            if self.n_components > n_samples:
+                raise ValueError(
+                    f"n_components={self.n_components} must be <= "
+                    f"batch n_samples={n_samples}."
+                )
 
         if X.dtype not in valid_dtypes:
             X = X.to(torch.float32)
 
         return X
 
+    def _validate_transform(self, X) -> torch.Tensor:
+        if not hasattr(self, "components_"):
+            raise ValueError("IncrementalPCA instance is not fitted yet.")
+
+        if not isinstance(X, torch.Tensor):
+            X = torch.tensor(
+                X, dtype=self.components_.dtype, device=self.components_.device
+            )
+        else:
+            if X.device != self.components_.device:
+                raise ValueError(
+                    f"X is on device {X.device}, "
+                    f"but model is on {self.components_.device}."
+                )
+            if X.dtype != self.components_.dtype:
+                X = X.to(self.components_.dtype)
+
+        if X.shape[1] != self.n_features_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but model was fitted "
+                f"with {self.n_features_}."
+            )
+
+        if self.ensure_contiguous and not X.is_contiguous():
+            X = X.contiguous()
+
+        return X
+
     @staticmethod
     def _incremental_mean_and_var(
-        X, last_mean, last_variance, last_sample_count
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        X: torch.Tensor,
+        last_mean: Optional[torch.Tensor],
+        last_variance: Optional[torch.Tensor],
+        last_sample_count: int,
+        *,
+        stats_dtype: torch.dtype,
+    ) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]:
         """
-        Computes the incremental mean and variance for the data `X`.
-
-        Uses float64 internally for numerical stability when accumulating sums,
-        matching the behavior of scikit-learn's implementation. The results are
-        cast back to the input dtype before returning to avoid propagating float64
-        into downstream computations (e.g., SVD), which would significantly hurt
-        GPU performance.
-
-        Args:
-            X (torch.Tensor): The batch input data tensor with shape (n_samples, n_features).
-            last_mean (torch.Tensor): The previous mean tensor with shape (n_features,).
-            last_variance (torch.Tensor): The previous variance tensor with shape (n_features,).
-            last_sample_count (torch.Tensor): The count tensor of samples processed before the current batch.
-
         Returns:
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Updated mean, variance tensors, and total sample count.
+            mean (D,), var (D,), total_count (int), batch_mean (D,), batch_var (D,)
         """
-        if X.shape[0] == 0:
-            return last_mean, last_variance, last_sample_count
-
-        if last_sample_count > 0:
-            if last_mean is None:
-                raise ValueError("last_mean should not be None if last_sample_count > 0.")
-            if last_variance is None:
-                raise ValueError("last_variance should not be None if last_sample_count > 0.")
+        n2 = int(X.shape[0])
+        if n2 == 0:
+            if last_mean is None or last_variance is None:
+                raise ValueError("Empty batch with uninitialized statistics.")
+            # batch_mean/var are undefined; return last as batch too
+            return last_mean, last_variance, last_sample_count, last_mean, last_variance
 
         input_dtype = X.dtype
+        Xs = X if X.dtype == stats_dtype else X.to(stats_dtype)
 
-        new_sample_count = torch.tensor([X.shape[0]], device=X.device)
-        updated_sample_count = last_sample_count + new_sample_count
+        batch_var, batch_mean = torch.var_mean(Xs, dim=0, unbiased=False)
 
-        if last_mean is None:
-            last_sum = torch.zeros(X.shape[1], dtype=torch.float64, device=X.device)
+        if last_sample_count == 0 or last_mean is None or last_variance is None:
+            mean = batch_mean
+            var = batch_var
+            n = n2
         else:
-            last_sum = last_mean.double() * last_sample_count
+            n1 = last_sample_count
+            m1 = last_mean.to(stats_dtype)
+            v1 = last_variance.to(stats_dtype)
+            m2 = batch_mean
+            v2 = batch_var
+            n = n1 + n2
 
-        new_sum = X.sum(dim=0, dtype=torch.float64)
+            mean = (m1 * n1 + m2 * n2) / n
+            d1 = m1 - mean
+            d2 = m2 - mean
+            ss = n1 * (v1 + d1.square()) + n2 * (v2 + d2.square())
+            var = ss / n
 
-        updated_mean = (last_sum + new_sum) / updated_sample_count
-
-        T = new_sum / new_sample_count
-        temp = X - T
-        correction = temp.sum(dim=0, dtype=torch.float64).square()
-        temp.square_()
-        new_unnormalized_variance = temp.sum(dim=0, dtype=torch.float64)
-        new_unnormalized_variance -= correction / new_sample_count
-        if last_variance is None:
-            updated_variance = new_unnormalized_variance / updated_sample_count
-        else:
-            last_unnormalized_variance = last_variance.double() * last_sample_count
-            last_over_new_count = last_sample_count.double() / new_sample_count
-            updated_unnormalized_variance = (
-                last_unnormalized_variance
-                + new_unnormalized_variance
-                + last_over_new_count / updated_sample_count * (last_sum / last_over_new_count - new_sum).square()
-            )
-            updated_variance = updated_unnormalized_variance / updated_sample_count
-
-        # Cast back to input dtype to avoid float64 propagating into SVD/eigendecomp,
-        # which would severely hurt GPU performance (float64 throughput is up to 32x
-        # lower than float32 on consumer GPUs).
-        return updated_mean.to(input_dtype), updated_variance.to(input_dtype), updated_sample_count
+        mean_out = mean.to(input_dtype)
+        var_out = var.to(input_dtype)
+        batch_mean_out = batch_mean.to(input_dtype)
+        batch_var_out = batch_var.to(input_dtype)
+        return mean_out, var_out, int(n), batch_mean_out, batch_var_out
 
     @staticmethod
-    def _svd_flip(u, v, u_based_decision=True) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Adjusts the signs of the singular vectors from the SVD decomposition for deterministic output.
-
-        This method ensures that the output remains consistent across different runs.
-
-        Args:
-            u (torch.Tensor): Left singular vectors tensor.
-            v (torch.Tensor): Right singular vectors tensor.
-            u_based_decision (bool, optional): If True, uses the left singular vectors to determine the sign flipping.
-                Defaults to True.
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]: Adjusted left and right singular vectors tensors.
-        """
+    def _svd_flip(u: torch.Tensor, v: torch.Tensor, u_based_decision: bool = True):
+        # In-place sign correction on SVD outputs (not on inputs).
         if u_based_decision:
-            max_abs_cols = torch.argmax(torch.abs(u), dim=0)
-            signs = torch.sign(u[max_abs_cols, range(u.shape[1])])
+            max_abs_rows = torch.argmax(u.abs(), dim=0)
+            cols = torch.arange(u.shape[1], device=u.device)
+            signs = torch.sign(u[max_abs_rows, cols])
         else:
-            max_abs_rows = torch.argmax(torch.abs(v), dim=1)
-            signs = torch.sign(v[range(v.shape[0]), max_abs_rows])
+            max_abs_cols = torch.argmax(v.abs(), dim=1)
+            rows = torch.arange(v.shape[0], device=v.device)
+            signs = torch.sign(v[rows, max_abs_cols])
+
+        signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+
         u *= signs[: u.shape[1]].view(1, -1)
         v *= signs.view(-1, 1)
         return u, v
 
-    def fit(self, X, check_input=True):
+    def _get_x_aug_work(self, m: int, n_features: int, device, dtype) -> torch.Tensor:
+        need_new = (
+            self._x_aug_work is None
+            or self._x_aug_work.device != device
+            or self._x_aug_work.dtype != dtype
+            or self._x_aug_work.shape[1] != n_features
+            or self._x_aug_work.shape[0] < m
+        )
+        if need_new:
+            self._x_aug_work = torch.empty((m, n_features), device=device, dtype=dtype)
+        return self._x_aug_work[:m]
+
+    @torch.inference_mode()
+    def fit(self, X, check_input: bool = True):
         """
         Fits the model with data `X` using minibatches of size `batch_size`.
 
         Args:
             X (torch.Tensor): The input data tensor with shape (n_samples, n_features).
-            check_input (bool, optional): If True, validates the input. Defaults to True.
+            check_input (bool, optional): If True, validates the input. Defaults to
+                True.
 
         Returns:
             IncrementalPCA: The fitted IPCA model.
         """
         if check_input:
-            X = self._validate_data(X)
+            X = self._validate_fit_batch(X)
         n_samples, n_features = X.shape
+
         if self.batch_size is None:
-            self.batch_size = 5 * n_features
+            if self.gram:
+                k = self.n_components or 0
+                max_batch_for_wide = max(1, n_features - k - 1)
+                self.batch_size = min(5 * n_features, max_batch_for_wide)
+                if self.n_components is not None:
+                    # Ensure the first batch can learn the requested number of
+                    # components. If this violates the wide-matrix condition,
+                    # gram SVD will fall back to full SVD internally.
+                    self.batch_size = max(self.batch_size, self.n_components)
+            else:
+                self.batch_size = 5 * n_features
 
-        for batch in self.gen_batches(n_samples, self.batch_size, min_batch_size=self.n_components or 0):
+        if self.n_components is not None and self.batch_size < self.n_components:
+            raise ValueError(
+                f"batch_size={self.batch_size} must be "
+                f">= n_components={self.n_components}."
+            )
+
+        for batch in self.gen_batches(
+            n_samples, self.batch_size, min_batch_size=self.n_components or 0
+        ):
             self.partial_fit(X[batch], check_input=False)
-
         return self
 
-    def partial_fit(self, X, check_input=True):
+    @torch.inference_mode()
+    def partial_fit(self, X, check_input: bool = True):
         """
         Incrementally fits the model with batch data `X`.
 
         Args:
-            X (torch.Tensor): The batch input data tensor with shape (n_samples, n_features).
-            check_input (bool, optional): If True, validates the input. Defaults to True.
+            X (torch.Tensor): The batch input data tensor with shape (n_samples,
+                n_features).
+            check_input (bool, optional): If True, validates the input. Defaults to
+                True.
 
         Returns:
             IncrementalPCA: The updated IPCA model after processing the batch.
@@ -302,51 +430,98 @@ class IncrementalPCA:
         first_pass = not hasattr(self, "components_")
 
         if check_input:
-            X = self._validate_data(X)
+            X = self._validate_fit_batch(X)
+        else:
+            if self.ensure_contiguous and not X.is_contiguous():
+                X = X.contiguous()
+            if X.dtype not in (torch.float32, torch.float64):
+                X = X.to(torch.float32)
+
         n_samples, n_features = X.shape
 
-        # Initialize attributes to avoid errors during the first call to partial_fit
         if first_pass:
-            self.mean_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
-            self.var_ = None  # Will be initialized properly in _incremental_mean_and_var based on data dimensions
-            self.n_samples_seen_ = torch.tensor([0], device=X.device)
+            self.mean_ = None
+            self.var_ = None
+            self.n_samples_seen_ = 0  # python int
             self.n_features_ = n_features
             if not self.n_components:
                 self.n_components = min(n_samples, n_features)
 
         if n_features != self.n_features_:
             raise ValueError(
-                "Number of features of the new batch does not match the number of features of the first batch."
+                "Number of features of the new batch does not match the first batch."
             )
 
-        col_mean, col_var, n_total_samples = self._incremental_mean_and_var(
-            X, self.mean_, self.var_, self.n_samples_seen_
+        stats_dtype = (
+            self.stats_dtype
+            if self.stats_dtype is not None
+            else (torch.float32 if X.is_cuda else torch.float64)
         )
 
-        if first_pass:
-            X -= col_mean
-        else:
-            col_batch_mean = torch.mean(X, dim=0)
-            X -= col_batch_mean
-            mean_correction_factor = torch.sqrt((self.n_samples_seen_.to(X.dtype) / n_total_samples) * n_samples)
-            mean_correction = mean_correction_factor * (self.mean_ - col_batch_mean)
-            X = torch.vstack(
-                (
-                    self.singular_values_.view((-1, 1)) * self.components_,
-                    X,
-                    mean_correction,
-                )
+        col_mean, col_var, n_total_samples, batch_mean, _batch_var = (
+            self._incremental_mean_and_var(
+                X, self.mean_, self.var_, self.n_samples_seen_, stats_dtype=stats_dtype
             )
+        )
 
-        if self.lowrank:
-            U, S, Vt = self._svd_fn_lowrank(X)
-        elif self.gram:
-            U, S, Vt = self._svd_fn_gram(X)
+        # Build the matrix to decompose:
+        if first_pass:
+            if self.copy:
+                # Center (out-of-place) to avoid modifying input; this is one pass.
+                X_for_svd = X - col_mean
+            else:
+                # In-place centering for performance when caller allows mutation.
+                X.sub_(col_mean)
+                X_for_svd = X
         else:
-            U, S, Vt = self._svd_fn_full(X)
-        U, Vt = self._svd_flip(U, Vt, u_based_decision=False)
-        explained_variance = S**2 / (n_total_samples - 1)
-        explained_variance_ratio = S**2 / torch.sum(col_var * n_total_samples)
+            # Mean correction term
+            factor = math.sqrt((self.n_samples_seen_ / n_total_samples) * n_samples)
+            mean_correction = (self.mean_ - batch_mean) * factor  # (D,)
+
+            k = self.n_components
+            m = k + n_samples + 1
+
+            X_aug = self._get_x_aug_work(m, n_features, device=X.device, dtype=X.dtype)
+
+            # Top block: components_ * singular_values_ (fused into output)
+            torch.mul(self.components_, self.singular_values_[:, None], out=X_aug[:k])
+
+            # Middle block: centered batch written directly (no temp)
+            torch.sub(X, batch_mean, out=X_aug[k : k + n_samples])
+
+            # Last row: mean correction
+            X_aug[-1].copy_(mean_correction)
+
+            X_for_svd = X_aug
+
+        # Decomposition (optionally with TF32)
+        tail_ss = tail_count = None
+        with self._matmul_context():
+            if self.lowrank:
+                U, S, Vt = self._svd_fn_lowrank(X_for_svd)
+            elif self.gram:
+                U, S, Vt, tail_ss, tail_count = self._svd_fn_gram_topk(X_for_svd)
+            else:
+                U, S, Vt = self._svd_fn_full(X_for_svd)
+
+        if self.deterministic_flip:
+            # Prefer u-based decision to avoid expensive argmax over D.
+            U, Vt = self._svd_flip(U, Vt, u_based_decision=True)
+
+        S2 = S.square()
+        denom = col_var.sum() * n_total_samples
+
+        if n_total_samples > 1:
+            explained_variance = S2 / (n_total_samples - 1)
+        else:
+            explained_variance = torch.zeros_like(S2)
+
+        explained_variance_ratio = S2 / denom
+        explained_variance_ratio = torch.where(
+            torch.isfinite(explained_variance_ratio),
+            explained_variance_ratio,
+            torch.zeros_like(explained_variance_ratio),
+        )
 
         self.n_samples_seen_ = n_total_samples
         self.components_ = Vt[: self.n_components]
@@ -355,47 +530,68 @@ class IncrementalPCA:
         self.var_ = col_var
         self.explained_variance_ = explained_variance[: self.n_components]
         self.explained_variance_ratio_ = explained_variance_ratio[: self.n_components]
-        if self.n_components not in (n_samples, n_features):
-            self.noise_variance_ = explained_variance[self.n_components :].mean()
+
+        # Precompute mean projection for transform (avoids allocating X-mean)
+        # shape: (k,)
+        self.mean_proj_ = self.mean_ @ self.components_.T
+
+        # noise variance
+        if tail_ss is not None and tail_count is not None:
+            if tail_count > 0 and n_total_samples > 1:
+                self.noise_variance_ = (tail_ss / (n_total_samples - 1)) / tail_count
+            else:
+                self.noise_variance_ = torch.zeros((), device=X.device, dtype=X.dtype)
         else:
-            self.noise_variance_ = torch.tensor(0.0, device=X.device)
+            if S.numel() > self.n_components:
+                self.noise_variance_ = explained_variance[self.n_components :].mean()
+            else:
+                self.noise_variance_ = torch.zeros((), device=X.device, dtype=X.dtype)
+
         return self
 
+    @torch.inference_mode()
     def transform(self, X) -> torch.Tensor:
         """
         Applies dimensionality reduction to `X`.
 
-        The input data `X` is projected on the first principal components previously extracted from a training set.
+        The input data `X` is projected on the first principal components previously
+        extracted from a training set.
 
         Args:
-            X (torch.Tensor): New data tensor with shape (n_samples, n_features) to be transformed.
+            X (torch.Tensor): New data tensor with shape (n_samples, n_features) to
+                be transformed.
 
         Returns:
             torch.Tensor: Transformed data tensor with shape (n_samples, n_components).
         """
-        X = X - self.mean_
-        return torch.mm(X, self.components_.T)
+        X = self._validate_transform(X)
+        with self._matmul_context():
+            # Avoid allocating (X - mean) by using precomputed mean projection
+            return (X @ self.components_.T) - self.mean_proj_
 
     @staticmethod
     def gen_batches(n: int, batch_size: int, min_batch_size: int = 0):
         """Generator to create slices containing `batch_size` elements from 0 to `n`.
 
-        The last slice may contain less than `batch_size` elements, when `batch_size` does not divide `n`.
+        The last slice may contain less than `batch_size` elements,
+        when `batch_size` does not divide `n`.
 
         Args:
             n (int): Size of the sequence.
             batch_size (int): Number of elements in each batch.
-            min_batch_size (int, optional): Minimum number of elements in each batch. Defaults to 0.
+            min_batch_size (int, optional): Minimum number of elements in each batch.
+                Defaults to 0.
 
         Yields:
             slice: A slice of `batch_size` elements.
         """
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+
         start = 0
-        for _ in range(int(n // batch_size)):
-            end = start + batch_size
-            if end + min_batch_size > n:
-                continue
+        while start < n:
+            end = min(start + batch_size, n)
+            if n - end < min_batch_size:
+                end = n
             yield slice(start, end)
             start = end
-        if start < n:
-            yield slice(start, n)
