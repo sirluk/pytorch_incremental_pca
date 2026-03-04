@@ -212,6 +212,7 @@ class IncrementalPCA:
 
         # G is (m, m)
         G = X @ X.mT
+        G += self.gram_eps * torch.eye(m, device=G.device, dtype=G.dtype)
         evals, evecs = torch.linalg.eigh(G)  # ascending
 
         # Take largest-k (from the end) then flip just those to descending
@@ -220,7 +221,7 @@ class IncrementalPCA:
 
         S_k = torch.sqrt(evals_k.clamp(min=0))
 
-        invS = (S_k.clamp(min=self.gram_eps)).reciprocal()  # (k,)
+        invS = S_k.reciprocal()  # (k,)
 
         # Fuse scaling into small factor (k x m) then GEMM to get (k x D)
         # Vt_k = diag(1/S) @ U^T @ X
