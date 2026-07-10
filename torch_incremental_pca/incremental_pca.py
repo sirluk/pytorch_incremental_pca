@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+from numbers import Integral, Real
 from typing import Optional, Tuple
 
 import torch
@@ -118,27 +119,73 @@ class IncrementalPCA:
         self.matmul_precision = matmul_precision
         self.deterministic_flip = deterministic_flip
 
-        self.n_features_ = None
+        self._reset_fit_state()
+        self._validate_parameters()
 
-        # Workspace for augmented matrix to reduce allocations
+    def _reset_fit_state(self):
+        """Remove all state learned from earlier calls to fit."""
+        learned_attributes = (
+            "components_",
+            "singular_values_",
+            "mean_",
+            "var_",
+            "explained_variance_",
+            "explained_variance_ratio_",
+            "noise_variance_",
+            "mean_proj_",
+            "n_components_",
+            "batch_size_",
+            "n_features_",
+            "n_samples_seen_",
+        )
+        for attribute in learned_attributes:
+            self.__dict__.pop(attribute, None)
+
+        # Workspace for the augmented matrix; it must not survive a refit on a
+        # different shape, device, or dtype.
         self._x_aug_work: Optional[torch.Tensor] = None
 
+    @staticmethod
+    def _is_positive_integer(value) -> bool:
+        return isinstance(value, Integral) and not isinstance(value, bool) and value > 0
+
+    def _validate_parameters(self):
+        if self.n_components is not None and not self._is_positive_integer(
+            self.n_components
+        ):
+            raise ValueError("n_components must be a positive integer or None.")
+        if self.batch_size is not None and not self._is_positive_integer(
+            self.batch_size
+        ):
+            raise ValueError("batch_size must be a positive integer or None.")
+        if self.lowrank_q is not None and not self._is_positive_integer(self.lowrank_q):
+            raise ValueError("lowrank_q must be a positive integer or None.")
+        if (
+            not isinstance(self.lowrank_niter, Integral)
+            or isinstance(self.lowrank_niter, bool)
+            or self.lowrank_niter < 0
+        ):
+            raise ValueError("lowrank_niter must be a nonnegative integer.")
+        if (
+            not isinstance(self.gram_eps, Real)
+            or isinstance(self.gram_eps, bool)
+            or not math.isfinite(float(self.gram_eps))
+            or self.gram_eps <= 0
+        ):
+            raise ValueError("gram_eps must be finite and strictly positive.")
+        if self.stats_dtype not in (None, torch.float32, torch.float64):
+            raise ValueError(
+                "stats_dtype must be torch.float32, torch.float64, or None."
+            )
         if self.lowrank and self.gram:
             raise ValueError(
                 "lowrank and gram are mutually exclusive. Set only one to True."
             )
-        if self.lowrank:
-            self._validate_lowrank_params()
-
-    def _validate_lowrank_params(self):
-        if self.lowrank_q is None:
-            if self.n_components is None:
-                raise ValueError(
-                    "n_components must be specified when using lowrank mode "
-                    "with lowrank_q=None."
-                )
-            self.lowrank_q = self.n_components * 2
-        elif self.n_components is not None and self.lowrank_q < self.n_components:
+        if (
+            self.lowrank_q is not None
+            and self.n_components is not None
+            and self.lowrank_q < self.n_components
+        ):
             raise ValueError("lowrank_q must be >= n_components.")
 
     @contextlib.contextmanager
@@ -190,11 +237,18 @@ class IncrementalPCA:
         return torch.linalg.svd(X, full_matrices=False, driver=self.svd_driver)
 
     def _svd_fn_lowrank(self, X):
+        q = self.lowrank_q
+        if q is None:
+            q = self.n_components_ * 2
+        q = min(q, min(X.shape))
+        if q < self.n_components_:
+            raise ValueError("lowrank_q must be >= n_components_.")
+
         seed_enabled = self.lowrank_seed is not None
         with torch.random.fork_rng(enabled=seed_enabled):
             if seed_enabled:
                 torch.manual_seed(self.lowrank_seed)
-            U, S, V = torch.svd_lowrank(X, q=self.lowrank_q, niter=self.lowrank_niter)
+            U, S, V = torch.svd_lowrank(X, q=q, niter=self.lowrank_niter)
             return U, S, V.mH
 
     def _svd_fn_gram_topk(self, X):
@@ -208,28 +262,38 @@ class IncrementalPCA:
             U, S, Vt = self._svd_fn_full(X)
             return U, S, Vt, None, None
 
-        k = min(self.n_components or m, m)
+        k = min(self.n_components_, m)
 
         # G is (m, m)
         G = X @ X.mT
-        evals, evecs = torch.linalg.eigh(G)  # ascending
+        max_abs_diagonal = G.diagonal().abs().max()
+        loading = torch.maximum(
+            G.new_tensor(float(self.gram_eps) ** 2),
+            torch.finfo(G.dtype).eps * max(1, m) * max_abs_diagonal,
+        )
+        G.diagonal().add_(loading)
+
+        try:
+            _evals, evecs = torch.linalg.eigh(G)  # ascending
+        except torch.linalg.LinAlgError:
+            U, S, Vt = self._svd_fn_full(X)
+            return U, S, Vt, None, None
 
         # Take largest-k (from the end) then flip just those to descending
-        evals_k = evals[-k:].flip(0)  # (k,)
         U_k = evecs[:, -k:].flip(1)  # (m, k)
 
-        S_k = torch.sqrt(evals_k.clamp(min=0))
-
-        invS = (S_k.clamp(min=self.gram_eps)).reciprocal()  # (k,)
-
-        # Fuse scaling into small factor (k x m) then GEMM to get (k x D)
-        # Vt_k = diag(1/S) @ U^T @ X
-        Vt_k = (invS[:, None] * U_k.mT) @ X
+        # The diagonal loading is only for the eigensolver. Recover the actual,
+        # unshifted spectrum and right singular vectors from the original X.
+        Y = U_k.mT @ X
+        S_k = torch.linalg.vector_norm(Y, dim=1)
+        if (not bool(torch.isfinite(S_k).all())) or bool((S_k <= self.gram_eps).any()):
+            U, S, Vt = self._svd_fn_full(X)
+            return U, S, Vt, None, None
+        Vt_k = Y / S_k[:, None]
 
         tail_count = m - k
         if tail_count > 0:
-            # tail are the smallest m-k eigenvalues (ascending => evals[:-k])
-            tail_ss = evals[:-k].clamp(min=0).sum()
+            tail_ss = (X.square().sum() - S_k.square().sum()).clamp(min=0)
         else:
             tail_ss = torch.zeros((), device=X.device, dtype=X.dtype)
 
@@ -239,24 +303,24 @@ class IncrementalPCA:
         valid_dtypes = (torch.float32, torch.float64)
 
         if not isinstance(X, torch.Tensor):
-            X = torch.tensor(X, dtype=torch.float32)
+            X = torch.as_tensor(X)
         # NOTE: We no longer clone for copy=True. Inputs are only modified when
         # copy=False (first-pass centering).
+
+        if X.ndim != 2:
+            raise ValueError(f"X must be a 2D input; got {X.ndim} dimensions.")
+        if X.shape[0] == 0 or X.shape[1] == 0:
+            raise ValueError("X must be nonempty in both dimensions.")
 
         if self.ensure_contiguous and not X.is_contiguous():
             X = X.contiguous()
 
-        n_samples, n_features = X.shape
+        _n_samples, n_features = X.shape
         if self.n_components is not None:
             if self.n_components > n_features:
                 raise ValueError(
                     f"n_components={self.n_components} invalid "
                     f"for n_features={n_features}."
-                )
-            if self.n_components > n_samples:
-                raise ValueError(
-                    f"n_components={self.n_components} must be <= "
-                    f"batch n_samples={n_samples}."
                 )
 
         if X.dtype not in valid_dtypes:
@@ -280,6 +344,9 @@ class IncrementalPCA:
                 )
             if X.dtype != self.components_.dtype:
                 X = X.to(self.components_.dtype)
+
+        if X.ndim != 2:
+            raise ValueError(f"X must be a 2D input; got {X.ndim} dimensions.")
 
         if X.shape[1] != self.n_features_:
             raise ValueError(
@@ -384,31 +451,38 @@ class IncrementalPCA:
         Returns:
             IncrementalPCA: The fitted IPCA model.
         """
+        self._reset_fit_state()
+        self._validate_parameters()
+
         if check_input:
             X = self._validate_fit_batch(X)
+        elif X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
+            raise ValueError("X must be a nonempty 2D input.")
         n_samples, n_features = X.shape
 
         if self.batch_size is None:
             if self.gram:
                 k = self.n_components or 0
                 max_batch_for_wide = max(1, n_features - k - 1)
-                self.batch_size = min(5 * n_features, max_batch_for_wide)
+                self.batch_size_ = min(5 * n_features, max_batch_for_wide)
                 if self.n_components is not None:
                     # Ensure the first batch can learn the requested number of
                     # components. If this violates the wide-matrix condition,
                     # gram SVD will fall back to full SVD internally.
-                    self.batch_size = max(self.batch_size, self.n_components)
+                    self.batch_size_ = max(self.batch_size_, self.n_components)
             else:
-                self.batch_size = 5 * n_features
+                self.batch_size_ = 5 * n_features
+        else:
+            self.batch_size_ = self.batch_size
 
-        if self.n_components is not None and self.batch_size < self.n_components:
+        if self.n_components is not None and self.batch_size_ < self.n_components:
             raise ValueError(
-                f"batch_size={self.batch_size} must be "
+                f"batch_size={self.batch_size_} must be "
                 f">= n_components={self.n_components}."
             )
 
         for batch in self.gen_batches(
-            n_samples, self.batch_size, min_batch_size=self.n_components or 0
+            n_samples, self.batch_size_, min_batch_size=self.n_components or 0
         ):
             self.partial_fit(X[batch], check_input=False)
         return self
@@ -427,11 +501,14 @@ class IncrementalPCA:
         Returns:
             IncrementalPCA: The updated IPCA model after processing the batch.
         """
+        self._validate_parameters()
         first_pass = not hasattr(self, "components_")
 
         if check_input:
             X = self._validate_fit_batch(X)
         else:
+            if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
+                raise ValueError("X must be a nonempty 2D input.")
             if self.ensure_contiguous and not X.is_contiguous():
                 X = X.contiguous()
             if X.dtype not in (torch.float32, torch.float64):
@@ -444,8 +521,16 @@ class IncrementalPCA:
             self.var_ = None
             self.n_samples_seen_ = 0  # python int
             self.n_features_ = n_features
-            if not self.n_components:
-                self.n_components = min(n_samples, n_features)
+            self.n_components_ = (
+                self.n_components
+                if self.n_components is not None
+                else min(n_samples, n_features)
+            )
+            if self.n_components_ > n_samples:
+                raise ValueError(
+                    f"n_components={self.n_components_} must be <= "
+                    f"the first batch n_samples={n_samples}."
+                )
 
         if n_features != self.n_features_:
             raise ValueError(
@@ -478,7 +563,7 @@ class IncrementalPCA:
             factor = math.sqrt((self.n_samples_seen_ / n_total_samples) * n_samples)
             mean_correction = (self.mean_ - batch_mean) * factor  # (D,)
 
-            k = self.n_components
+            k = self.n_components_
             m = k + n_samples + 1
 
             X_aug = self._get_x_aug_work(m, n_features, device=X.device, dtype=X.dtype)
@@ -524,28 +609,34 @@ class IncrementalPCA:
         )
 
         self.n_samples_seen_ = n_total_samples
-        self.components_ = Vt[: self.n_components]
-        self.singular_values_ = S[: self.n_components]
+        self.components_ = Vt[: self.n_components_]
+        self.singular_values_ = S[: self.n_components_]
         self.mean_ = col_mean
         self.var_ = col_var
-        self.explained_variance_ = explained_variance[: self.n_components]
-        self.explained_variance_ratio_ = explained_variance_ratio[: self.n_components]
+        self.explained_variance_ = explained_variance[: self.n_components_]
+        self.explained_variance_ratio_ = explained_variance_ratio[: self.n_components_]
 
         # Precompute mean projection for transform (avoids allocating X-mean)
         # shape: (k,)
         self.mean_proj_ = self.mean_ @ self.components_.T
 
         # noise variance
-        if tail_ss is not None and tail_count is not None:
-            if tail_count > 0 and n_total_samples > 1:
-                self.noise_variance_ = (tail_ss / (n_total_samples - 1)) / tail_count
+        discarded_count = min(X_for_svd.shape) - self.n_components_
+        if discarded_count > 0 and n_total_samples > 1:
+            if tail_ss is not None and tail_count is not None:
+                residual_ss = tail_ss
+                discarded_count = tail_count
+            elif self.lowrank:
+                residual_ss = (
+                    X_for_svd.square().sum() - self.singular_values_.square().sum()
+                ).clamp(min=0)
             else:
-                self.noise_variance_ = torch.zeros((), device=X.device, dtype=X.dtype)
+                residual_ss = S[self.n_components_ :].square().sum()
+            self.noise_variance_ = residual_ss / (
+                (n_total_samples - 1) * discarded_count
+            )
         else:
-            if S.numel() > self.n_components:
-                self.noise_variance_ = explained_variance[self.n_components :].mean()
-            else:
-                self.noise_variance_ = torch.zeros((), device=X.device, dtype=X.dtype)
+            self.noise_variance_ = torch.zeros((), device=X.device, dtype=X.dtype)
 
         return self
 

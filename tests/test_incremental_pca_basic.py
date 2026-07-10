@@ -102,7 +102,8 @@ def test_single_sample_batch_produces_finite_stats():
     ipca = IncrementalPCA()
     ipca.partial_fit(X)
 
-    assert ipca.n_components == 1
+    assert ipca.n_components is None
+    assert ipca.n_components_ == 1
     assert torch.isfinite(ipca.explained_variance_).all()
     assert torch.isfinite(ipca.explained_variance_ratio_).all()
     assert torch.isfinite(ipca.noise_variance_).item()
