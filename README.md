@@ -173,3 +173,11 @@ The regular test suite is run with:
 ~~~bash
 python -m pytest -q
 ~~~
+
+## Acknowledgments
+
+The early implementation adapted code from David Ng's
+[PCAonGPU](https://github.com/dnhkng/PCAonGPU), alongside scikit-learn's
+IncrementalPCA implementation. This project has since added its own improvements
+and extensions. The MIT license and copyright notices for PCAonGPU and this
+project are preserved in [LICENSE](LICENSE).
