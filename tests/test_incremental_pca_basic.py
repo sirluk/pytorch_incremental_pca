@@ -35,7 +35,7 @@ def test_copy_flag_controls_input_mutation_on_first_partial_fit():
 
     assert not torch.allclose(X2, X2_orig)
     assert torch.allclose(
-        ipca2.mean_, X2_orig.mean(dim=0), atol=1e-5, rtol=0
+        ipca2.mean_, X2_orig.double().mean(dim=0), atol=1e-5, rtol=0
     ), "mean_ should be computed from the original (pre-mutation) batch"
     assert torch.allclose(
         X2.mean(dim=0), torch.zeros(10), atol=1e-5, rtol=0
@@ -46,7 +46,8 @@ def test_partial_fit_casts_non_float32_64_to_float32():
     X16 = torch.randn(20, 10).to(torch.float16)
     ipca = IncrementalPCA(n_components=5)
     ipca.partial_fit(X16)
-    assert ipca.mean_.dtype == torch.float32
+    # CPU statistics retain their float64 accumulation precision.
+    assert ipca.mean_.dtype == torch.float64
     assert ipca.components_.dtype == torch.float32
 
 

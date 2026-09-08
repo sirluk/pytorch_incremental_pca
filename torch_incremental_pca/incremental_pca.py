@@ -3,79 +3,55 @@ from __future__ import annotations
 import contextlib
 import math
 from numbers import Integral, Real
-from typing import Optional, Tuple
+from typing import Iterator, Optional, Tuple
 
 import torch
 
 
 class IncrementalPCA:
-    """
-    An implementation of Incremental Principal Components Analysis (IPCA) that leverages
-    PyTorch for GPU acceleration.
-    Adapted from
+    """Incremental principal component analysis for CPU and CUDA tensors.
+
+    The update follows scikit-learn's augmented-matrix incremental SVD:
     https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/decomposition/_incremental_pca.py
 
-    This class provides methods to fit the model on data incrementally in batches,
-    and to transform new data based on the principal components learned during the
-    fitting process.
-
-    Three SVD backends are available, selectable via the `lowrank` and `gram` flags:
-
-    - **Full SVD** (default): Uses `torch.linalg.svd`. Exact but uses Householder
-      bidiagonalization which is inherently sequential and underutilizes GPU
-      parallelism.
-    - **Low-rank SVD** (`lowrank=True`): Uses `torch.svd_lowrank` (randomized SVD).
-      Faster for very large matrices where `n_components << min(n_samples, n_features)`,
-      but involves multiple power iterations that can be slower for moderate-sized
-      matrices.
-    - **Gram eigendecomposition** (`gram=True`): Computes `G = X @ X.T` (a GEMM) then
-      `torch.linalg.eigh(G)` to recover singular values/vectors. Mathematically
-      equivalent to full SVD but significantly faster on GPU because it replaces
-      sequential Householder reflections with highly-parallelizable matrix
-      multiplications. Recommended when the augmented matrix is wide (rows < cols),
-      which is the typical case in incremental PCA when
-      `n_components + batch_size < n_features`.
-
     Args:
-        n_components (int, optional): Number of components to keep. If `None`, it's
-            set to the minimum of the number of samples and features. Defaults to None.
-        copy (bool): If False, this class may overwrite (mutate) input data in-place
-            for performance (currently only on the first `partial_fit`, during
-            centering). Defaults to True.
-        batch_size (int, optional): The number of samples to use for each batch.
-            Only needed if self.fit is called. If `None`, it's inferred from the data
-            and set to `5 * n_features`. Defaults to None.
-        svd_driver (str, optional): name of the cuSOLVER method to be used for
-            torch.linalg.svd. This keyword argument only works on CUDA inputs. Available
-            options are: None, gesvd, gesvdj, and gesvda. Defaults to None.
-        lowrank (bool, optional): Whether to use torch.svd_lowrank instead of
-            torch.linalg.svd which can be faster. Mutually exclusive with `gram`.
-            Defaults to False.
-        lowrank_q (int, optional): For an adequate approximation of n_components,
-            this parameter defaults to n_components * 2.
-        lowrank_niter (int, optional): Number of subspace iterations to conduct for
-            torch.svd_lowrank. Defaults to 4.
-        lowrank_seed (int, optional): Seed for making results of torch.svd_lowrank
-            reproducible.
-        gram (bool, optional): Whether to use gram-matrix eigendecomposition instead of
-            torch.linalg.svd. For wide matrices (rows < cols), this computes G = X @ X.T
-            followed by torch.linalg.eigh(G) and recovers singular vectors via
-            Vt = U.T @ X / S. Mathematically equivalent to full SVD but significantly
-            faster on GPU because it uses GEMM operations instead of sequential
-            Householder reflections. Falls back to full SVD when the matrix is tall
-            (rows > cols). Mutually exclusive with `lowrank`. Defaults to False.
-        stats_dtype (torch.dtype, optional): Data type to use for computing statistics
-            (mean and variance). Defaults to None.
-        ensure_contiguous (bool): Whether to enforce contiguous memory layout for inputs
-            Defaults to True.
-        gram_eps (float): Small epsilon value to avoid division by zero when computing
-            inverse of singular values in gram mode. Defaults to 1e-7.
-        allow_tf32 (bool, optional): Whether to allow TensorFloat-32 (TF32) execution
-            on Ampere+ GPUs for matrix multiplications. Defaults to None.
-        matmul_precision (str, optional): Matmul precision to use ("highest", "high",
-            or "medium"). Requires PyTorch >= 2.0. Defaults to None.
-        deterministic_flip (bool): Whether to apply SVD sign flipping deterministically.
-            Defaults to True.
+        n_components: Retained rank. None infers the rank from the first batch.
+            Automatic fit batching allows min(n_samples, n_features) components.
+        copy: Preserve input batches when True. False allows centering a writable
+            first batch in place. Read-only arrays are copied one batch at a time.
+        batch_size: Fit batch size. The default is 5 * n_features for full and
+            randomized SVD, or a wide-matrix size in Gram mode when possible.
+        svd_driver: Optional CUDA torch.linalg.svd driver. PyTorch's default uses
+            gesvdj with a gesvd fallback. gesvda is approximate.
+        lowrank: Use randomized torch.svd_lowrank, exclusive with gram.
+        lowrank_q: Randomized subspace size, defaulting to twice the retained rank
+            and capped by matrix dimensions.
+        lowrank_niter: Randomized power iteration count, default 4.
+        lowrank_seed: Optional seed with scoped RNG state restoration.
+        gram: Use a wide matrix's X @ X.T eigensystem. This squares the condition
+            number, so numerically unreliable retained directions fall back to
+            full SVD. Tall matrices also use full SVD.
+        stats_dtype: Persistent mean/variance precision. Defaults to float64 on
+            CPU and the computation dtype on CUDA; float64 input is not demoted.
+        ensure_contiguous: Make each input batch contiguous before computation.
+        gram_eps: Positive absolute singular-value floor, combined with a
+            scale-aware Gram eigenvalue reliability check. Default 1e-7.
+        allow_tf32: Optional scoped float32 matmul setting. Cannot conflict with
+            matmul_precision. These settings are process-wide, not thread-local.
+        matmul_precision: Optional highest, high, or medium float32 matmul mode.
+        deterministic_flip: Apply a consistent sign convention to retained axes.
+        compute_device: Optional device for per-batch input transfers. None uses
+            the first batch's device. Refitting can establish a new device/dtype.
+        whiten: Scale scores using learned variances. Degenerate coordinates are
+            zeroed; inverse_transform applies the corresponding inverse scaling.
+        whiten_eps: Relative cutoff on component standard deviation, compared
+            with the largest retained standard deviation. Default 1e-7.
+
+    Fitting and projection disable autograd and autocast. Returned projections
+    are normal tensors and can feed a trainable downstream model. Components
+    keep the first batch's float32/float64 compute dtype, while statistics retain
+    stats_dtype. fit and transform accept sliceable NumPy/memmap/lazy sources;
+    transform_batches bounds result storage as well as input storage.
     """
 
     def __init__(
@@ -99,6 +75,10 @@ class IncrementalPCA:
             str
         ] = None,  # "highest" | "high" | "medium" (torch>=2.0)
         deterministic_flip: bool = True,
+        *,
+        compute_device: Optional[torch.device | str] = None,
+        whiten: bool = False,
+        whiten_eps: float = 1e-7,
     ):
         self.n_components = n_components
         self.copy = copy
@@ -118,6 +98,11 @@ class IncrementalPCA:
         self.allow_tf32 = allow_tf32
         self.matmul_precision = matmul_precision
         self.deterministic_flip = deterministic_flip
+        self.compute_device = (
+            torch.device(compute_device) if compute_device is not None else None
+        )
+        self.whiten = whiten
+        self.whiten_eps = whiten_eps
 
         self._reset_fit_state()
         self._validate_parameters()
@@ -137,6 +122,7 @@ class IncrementalPCA:
             "batch_size_",
             "n_features_",
             "n_samples_seen_",
+            "_whitening_cache",
         )
         for attribute in learned_attributes:
             self.__dict__.pop(attribute, None)
@@ -177,6 +163,23 @@ class IncrementalPCA:
             raise ValueError(
                 "stats_dtype must be torch.float32, torch.float64, or None."
             )
+        if self.matmul_precision not in (None, "highest", "high", "medium"):
+            raise ValueError("matmul_precision must be highest, high, medium, or None.")
+        if (
+            self.allow_tf32 is not None
+            and self.matmul_precision is not None
+            and bool(self.allow_tf32) != (self.matmul_precision != "highest")
+        ):
+            raise ValueError(
+                "allow_tf32 and matmul_precision specify conflicting precision."
+            )
+        if (
+            not isinstance(self.whiten_eps, Real)
+            or isinstance(self.whiten_eps, bool)
+            or not math.isfinite(float(self.whiten_eps))
+            or self.whiten_eps <= 0
+        ):
+            raise ValueError("whiten_eps must be finite and strictly positive.")
         if self.lowrank and self.gram:
             raise ValueError(
                 "lowrank and gram are mutually exclusive. Set only one to True."
@@ -190,48 +193,21 @@ class IncrementalPCA:
 
     @contextlib.contextmanager
     def _matmul_context(self):
-        # Scoped TF32 / matmul precision toggles; restored afterwards.
-        old_tf32 = None
-        old_cudnn_tf32 = None
-        old_prec = None
-        changed_tf32 = self.allow_tf32 is not None and torch.cuda.is_available()
-        changed_prec = self.matmul_precision is not None and hasattr(
-            torch, "set_float32_matmul_precision"
-        )
-
+        # The legacy TF32 flag and matmul precision control the same state.
+        # Save/restore the complete precision, including "medium". PCA does not
+        # need to alter the unrelated cuDNN convolution policy.
+        precision = self.matmul_precision
+        if precision is None and self.allow_tf32 is not None:
+            precision = "high" if self.allow_tf32 else "highest"
+        if precision is None:
+            yield
+            return
+        old_precision = torch.get_float32_matmul_precision()
         try:
-            if changed_tf32:
-                old_tf32 = torch.backends.cuda.matmul.allow_tf32
-                torch.backends.cuda.matmul.allow_tf32 = bool(self.allow_tf32)
-                # cudnn TF32 can matter for some ops; harmless to mirror
-                if hasattr(torch.backends, "cudnn") and hasattr(
-                    torch.backends.cudnn, "allow_tf32"
-                ):
-                    old_cudnn_tf32 = torch.backends.cudnn.allow_tf32
-                    torch.backends.cudnn.allow_tf32 = bool(self.allow_tf32)
-
-            if changed_prec:
-                # torch.get_float32_matmul_precision exists on modern PyTorch
-                if hasattr(torch, "get_float32_matmul_precision"):
-                    old_prec = torch.get_float32_matmul_precision()
-                torch.set_float32_matmul_precision(self.matmul_precision)
-
+            torch.set_float32_matmul_precision(precision)
             yield
         finally:
-            if (
-                changed_prec
-                and old_prec is not None
-                and hasattr(torch, "set_float32_matmul_precision")
-            ):
-                torch.set_float32_matmul_precision(old_prec)
-            if changed_tf32 and old_tf32 is not None:
-                torch.backends.cuda.matmul.allow_tf32 = old_tf32
-            if (
-                changed_tf32
-                and old_cudnn_tf32 is not None
-                and hasattr(torch.backends, "cudnn")
-            ):
-                torch.backends.cudnn.allow_tf32 = old_cudnn_tf32
+            torch.set_float32_matmul_precision(old_precision)
 
     def _svd_fn_full(self, X):
         return torch.linalg.svd(X, full_matrices=False, driver=self.svd_driver)
@@ -252,161 +228,197 @@ class IncrementalPCA:
             return U, S, V.mH
 
     def _svd_fn_gram_topk(self, X):
-        """
-        Wide-matrix fast path: G = X @ X.T then eigh(G), recover Vt.
-        Avoids flipping full eigensystem; slices only top-k.
-        Also fuses invS scaling into the small (k x m) factor before GEMM.
-        """
+        """Recover retained singular triplets from a wide matrix's Gram system."""
         m, D = X.shape
         if m > D:
             U, S, Vt = self._svd_fn_full(X)
             return U, S, Vt, None, None
 
-        k = min(self.n_components_, m)
-
-        # G is (m, m)
+        rank = getattr(self, "n_components_", self.n_components)
+        k = min(rank if rank is not None else m, m)
         G = X @ X.mT
         max_abs_diagonal = G.diagonal().abs().max()
-        loading = torch.maximum(
-            G.new_tensor(float(self.gram_eps) ** 2),
-            torch.finfo(G.dtype).eps * max(1, m) * max_abs_diagonal,
+        loading = (torch.finfo(G.dtype).eps * m * max_abs_diagonal).clamp_min(
+            float(self.gram_eps) ** 2
         )
         G.diagonal().add_(loading)
-
         try:
-            _evals, evecs = torch.linalg.eigh(G)  # ascending
+            evals, evecs = torch.linalg.eigh(G)
         except torch.linalg.LinAlgError:
             U, S, Vt = self._svd_fn_full(X)
             return U, S, Vt, None, None
 
-        # Take largest-k (from the end) then flip just those to descending
-        U_k = evecs[:, -k:].flip(1)  # (m, k)
-
-        # The diagonal loading is only for the eigensolver. Recover the actual,
-        # unshifted spectrum and right singular vectors from the original X.
+        U_k = evecs[:, -k:].flip(1)
         Y = U_k.mT @ X
         S_k = torch.linalg.vector_norm(Y, dim=1)
-        if (not bool(torch.isfinite(S_k).all())) or bool((S_k <= self.gram_eps).any()):
+        # An absolute singular-value check accepts roundoff as a null-space
+        # direction on scaled/rank-deficient inputs. Test the unshifted retained
+        # eigenvalue against the Gram rounding scale too. One host sync suffices.
+        reliable = (
+            torch.isfinite(S_k).all()
+            & (S_k.min() > self.gram_eps)
+            & (evals[-k] - loading > loading)
+        )
+        if not bool(reliable):
             U, S, Vt = self._svd_fn_full(X)
             return U, S, Vt, None, None
-        Vt_k = Y / S_k[:, None]
 
+        # Norm recovery can slightly reorder almost-tied eigenvalues.
+        S_k, order = S_k.sort(descending=True)
+        U_k = U_k[:, order]
+        Vt_k = Y[order] / S_k[:, None]
         tail_count = m - k
-        if tail_count > 0:
-            tail_ss = (X.square().sum() - S_k.square().sum()).clamp(min=0)
-        else:
-            tail_ss = torch.zeros((), device=X.device, dtype=X.dtype)
-
+        tail_ss = (
+            (torch.linalg.vector_norm(X).square() - S_k.square().sum()).clamp(min=0)
+            if tail_count > 0
+            else X.new_zeros(())
+        )
         return U_k, S_k, Vt_k, tail_ss, tail_count
 
-    def _validate_fit_batch(self, X) -> torch.Tensor:
-        valid_dtypes = (torch.float32, torch.float64)
-
-        if not isinstance(X, torch.Tensor):
-            X = torch.as_tensor(X)
-        # NOTE: We no longer clone for copy=True. Inputs are only modified when
-        # copy=False (first-pass centering).
-
-        if X.ndim != 2:
-            raise ValueError(f"X must be a 2D input; got {X.ndim} dimensions.")
-        if X.shape[0] == 0 or X.shape[1] == 0:
+    @staticmethod
+    def _source_shape(X, *, allow_empty=False):
+        """Inspect an array/lazy source without converting or loading its contents."""
+        shape = getattr(X, "shape", None)
+        if shape is None:
+            try:
+                shape = (len(X), len(X[0]))
+            except (TypeError, IndexError, KeyError) as exc:
+                raise ValueError("X must be a nonempty 2D input.") from exc
+        if len(shape) != 2:
+            raise ValueError(f"X must be a 2D input; got {len(shape)} dimensions.")
+        n_samples, n_features = shape
+        if n_features == 0 or (n_samples == 0 and not allow_empty):
             raise ValueError("X must be nonempty in both dimensions.")
+        return int(n_samples), int(n_features)
 
-        if self.ensure_contiguous and not X.is_contiguous():
-            X = X.contiguous()
+    @staticmethod
+    def _as_tensor_batch(X):
+        if isinstance(X, torch.Tensor):
+            return X
+        # A read-only mmap cannot safely back an in-place PyTorch operation.
+        # This copy is bounded by the already-sliced batch, not the dataset.
+        flags = getattr(X, "flags", None)
+        strides = getattr(X, "strides", ())
+        if (flags is not None and not flags.writeable) or any(s < 0 for s in strides):
+            X = X.copy()
+        return torch.as_tensor(X)
 
-        _n_samples, n_features = X.shape
-        if self.n_components is not None:
-            if self.n_components > n_features:
-                raise ValueError(
-                    f"n_components={self.n_components} invalid "
-                    f"for n_features={n_features}."
-                )
-
-        if X.dtype not in valid_dtypes:
-            X = X.to(torch.float32)
-
-        return X
-
-    def _validate_transform(self, X) -> torch.Tensor:
-        if not hasattr(self, "components_"):
-            raise ValueError("IncrementalPCA instance is not fitted yet.")
-
-        if not isinstance(X, torch.Tensor):
-            X = torch.tensor(
-                X, dtype=self.components_.dtype, device=self.components_.device
+    def _validate_fit_batch(self, X) -> torch.Tensor:
+        tensor_input = isinstance(X, torch.Tensor)
+        X = self._as_tensor_batch(X)
+        self._source_shape(X)
+        if X.is_complex():
+            raise ValueError("X must contain real-valued data.")
+        if self.n_components is not None and self.n_components > X.shape[1]:
+            raise ValueError(
+                f"n_components={self.n_components} invalid for n_features={X.shape[1]}."
             )
-        else:
-            if X.device != self.components_.device:
+        fitted = hasattr(self, "components_")
+        target_device = self.compute_device
+        if fitted:
+            if (
+                target_device is None
+                and tensor_input
+                and X.device != self.components_.device
+            ):
                 raise ValueError(
                     f"X is on device {X.device}, "
                     f"but model is on {self.components_.device}."
                 )
-            if X.dtype != self.components_.dtype:
-                X = X.to(self.components_.dtype)
-
-        if X.ndim != 2:
-            raise ValueError(f"X must be a 2D input; got {X.ndim} dimensions.")
-
-        if X.shape[1] != self.n_features_:
-            raise ValueError(
-                f"X has {X.shape[1]} features, but model was fitted "
-                f"with {self.n_features_}."
+            target_device = self.components_.device
+            dtype = self.components_.dtype
+        else:
+            dtype = (
+                X.dtype if X.dtype in (torch.float32, torch.float64) else torch.float32
             )
-
+        X = X.to(device=target_device or X.device, dtype=dtype)
         if self.ensure_contiguous and not X.is_contiguous():
             X = X.contiguous()
-
         return X
 
-    @staticmethod
+    def _validate_transform(self, X, *, inverse=False, allow_transfer=False):
+        if not hasattr(self, "components_"):
+            raise ValueError("IncrementalPCA instance is not fitted yet.")
+        if (
+            isinstance(X, torch.Tensor)
+            and X.device != self.components_.device
+            and not allow_transfer
+            and self.compute_device is None
+        ):
+            raise ValueError(
+                f"X is on device {X.device}, but model is on {self.components_.device}."
+            )
+        X = self._as_tensor_batch(X)
+        _, features = self._source_shape(X, allow_empty=True)
+        expected = self.n_components_ if inverse else self.n_features_
+        if features != expected:
+            raise ValueError(f"X has {features} features, but expected {expected}.")
+        if X.is_complex():
+            raise ValueError("X must contain real-valued data.")
+        X = X.to(device=self.components_.device, dtype=self.components_.dtype)
+        if self.ensure_contiguous and not X.is_contiguous():
+            X = X.contiguous()
+        return X
+
+    @classmethod
     def _incremental_mean_and_var(
+        cls,
         X: torch.Tensor,
         last_mean: Optional[torch.Tensor],
         last_variance: Optional[torch.Tensor],
         last_sample_count: int,
         *,
         stats_dtype: torch.dtype,
-    ) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        torch.Tensor,
+        torch.Tensor,
+        Optional[torch.Tensor],
+    ]:
         """
         Returns:
-            mean (D,), var (D,), total_count (int), batch_mean (D,), batch_var (D,)
+            mean, var, total_count, batch_mean, batch_var, batch_mean - last_mean
+            (the last value is None on the first batch).
         """
         n2 = int(X.shape[0])
         if n2 == 0:
             if last_mean is None or last_variance is None:
                 raise ValueError("Empty batch with uninitialized statistics.")
             # batch_mean/var are undefined; return last as batch too
-            return last_mean, last_variance, last_sample_count, last_mean, last_variance
+            return (
+                last_mean,
+                last_variance,
+                last_sample_count,
+                last_mean,
+                last_variance,
+                None,
+            )
 
-        input_dtype = X.dtype
         Xs = X if X.dtype == stats_dtype else X.to(stats_dtype)
-
         batch_var, batch_mean = torch.var_mean(Xs, dim=0, unbiased=False)
-
         if last_sample_count == 0 or last_mean is None or last_variance is None:
-            mean = batch_mean
-            var = batch_var
-            n = n2
-        else:
-            n1 = last_sample_count
-            m1 = last_mean.to(stats_dtype)
-            v1 = last_variance.to(stats_dtype)
-            m2 = batch_mean
-            v2 = batch_var
-            n = n1 + n2
+            return batch_mean, batch_var, n2, batch_mean, batch_var, None
 
-            mean = (m1 * n1 + m2 * n2) / n
-            d1 = m1 - mean
-            d2 = m2 - mean
-            ss = n1 * (v1 + d1.square()) + n2 * (v2 + d2.square())
-            var = ss / n
+        n1 = last_sample_count
+        n = n1 + n2
+        previous_mean = last_mean.to(stats_dtype)
+        previous_var = last_variance.to(stats_dtype)
+        mean, var, delta = cls._merge_statistics(
+            previous_mean, previous_var, batch_mean, batch_var, n1, n2
+        )
+        return mean, var, n, batch_mean, batch_var, delta
 
-        mean_out = mean.to(input_dtype)
-        var_out = var.to(input_dtype)
-        batch_mean_out = batch_mean.to(input_dtype)
-        batch_var_out = batch_var.to(input_dtype)
-        return mean_out, var_out, int(n), batch_mean_out, batch_var_out
+    @staticmethod
+    def _merge_statistics(previous_mean, previous_var, batch_mean, batch_var, n1, n2):
+        """Pure tensor Chan merge for optional compilation experiments."""
+        n = n1 + n2
+        delta = batch_mean - previous_mean
+        mean = previous_mean + (n2 / n) * delta
+        m2 = n1 * previous_var + n2 * batch_var + (n1 * (n2 / n)) * delta.square()
+        # Do not cast persistent statistics back to the decomposition dtype.
+        return mean, m2 / n, delta
 
     @staticmethod
     def _svd_flip(u: torch.Tensor, v: torch.Tensor, u_based_decision: bool = True):
@@ -438,82 +450,93 @@ class IncrementalPCA:
             self._x_aug_work = torch.empty((m, n_features), device=device, dtype=dtype)
         return self._x_aug_work[:m]
 
-    @torch.inference_mode()
+    def _build_augmented(self, X, batch_mean, mean_delta, factor):
+        k = self.n_components_
+        n_samples, n_features = X.shape
+        augmented = self._get_x_aug_work(
+            k + n_samples + 1, n_features, device=X.device, dtype=X.dtype
+        )
+        torch.mul(self.components_, self.singular_values_[:, None], out=augmented[:k])
+        torch.sub(X, batch_mean, out=augmented[k : k + n_samples])
+        torch.mul(mean_delta, -factor, out=augmented[-1])
+        return augmented
+
+    @torch.no_grad()
     def fit(self, X, check_input: bool = True):
-        """
-        Fits the model with data `X` using minibatches of size `batch_size`.
+        """Fit a sliceable 2D source, converting/transferring only one batch at a time.
 
-        Args:
-            X (torch.Tensor): The input data tensor with shape (n_samples, n_features).
-            check_input (bool, optional): If True, validates the input. Defaults to
-                True.
-
-        Returns:
-            IncrementalPCA: The fitted IPCA model.
+        X may be a tensor, a NumPy array/memmap, or a lazy source with ``shape``
+        and row slicing. ``compute_device`` controls the optional batch transfer.
+        Earlier fitted state is reset. With ``copy=False``, a writable first
+        batch may be centered in place.
         """
         self._reset_fit_state()
         self._validate_parameters()
-
-        if check_input:
-            X = self._validate_fit_batch(X)
-        elif X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
-            raise ValueError("X must be a nonempty 2D input.")
-        n_samples, n_features = X.shape
-
+        n_samples, n_features = self._source_shape(X)
+        k = (
+            self.n_components
+            if self.n_components is not None
+            else min(n_samples, n_features)
+        )
+        if k > n_features:
+            raise ValueError(f"n_components={k} invalid for n_features={n_features}.")
         if self.batch_size is None:
-            if self.gram:
-                k = self.n_components or 0
-                max_batch_for_wide = max(1, n_features - k - 1)
-                self.batch_size_ = min(5 * n_features, max_batch_for_wide)
-                if self.n_components is not None:
-                    # Ensure the first batch can learn the requested number of
-                    # components. If this violates the wide-matrix condition,
-                    # gram SVD will fall back to full SVD internally.
-                    self.batch_size_ = max(self.batch_size_, self.n_components)
-            else:
-                self.batch_size_ = 5 * n_features
+            self.batch_size_ = (
+                max(k, n_features - k - 1) if self.gram else 5 * n_features
+            )
         else:
             self.batch_size_ = self.batch_size
-
         if self.n_components is not None and self.batch_size_ < self.n_components:
             raise ValueError(
                 f"batch_size={self.batch_size_} must be "
                 f">= n_components={self.n_components}."
             )
-
         for batch in self.gen_batches(
             n_samples, self.batch_size_, min_batch_size=self.n_components or 0
         ):
-            self.partial_fit(X[batch], check_input=False)
+            self.partial_fit(X[batch], check_input=check_input)
         return self
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def partial_fit(self, X, check_input: bool = True):
-        """
-        Incrementally fits the model with batch data `X`.
+        """Update from one batch. The first batch must contain at least k rows.
 
-        Args:
-            X (torch.Tensor): The batch input data tensor with shape (n_samples,
-                n_features).
-            check_input (bool, optional): If True, validates the input. Defaults to
-                True.
-
-        Returns:
-            IncrementalPCA: The updated IPCA model after processing the batch.
+        Basic shape/device/dtype checks are always performed, including when
+        ``check_input=False``. Later batches use the first batch's compute dtype.
+        Autocast is disabled for the numerical update.
         """
         self._validate_parameters()
-        first_pass = not hasattr(self, "components_")
+        X = self._validate_fit_batch(X)
+        with torch.autocast(device_type=X.device.type, enabled=False):
+            return self._partial_fit(X)
 
-        if check_input:
-            X = self._validate_fit_batch(X)
+    def _prepare_update(self, X, stats_dtype, first_pass):
+        n_samples = X.shape[0]
+        col_mean, col_var, n_total_samples, batch_mean, _batch_var, mean_delta = (
+            self._incremental_mean_and_var(
+                X, self.mean_, self.var_, self.n_samples_seen_, stats_dtype=stats_dtype
+            )
+        )
+
+        # Build the matrix to decompose:
+        if first_pass:
+            if self.copy:
+                # Center (out-of-place) to avoid modifying input; this is one pass.
+                X_for_svd = torch.empty_like(X)
+                torch.sub(X, col_mean, out=X_for_svd)
+            else:
+                # In-place centering for performance when caller allows mutation.
+                X.sub_(col_mean)
+                X_for_svd = X
         else:
-            if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
-                raise ValueError("X must be a nonempty 2D input.")
-            if self.ensure_contiguous and not X.is_contiguous():
-                X = X.contiguous()
-            if X.dtype not in (torch.float32, torch.float64):
-                X = X.to(torch.float32)
+            # Mean correction term
+            factor = math.sqrt((self.n_samples_seen_ / n_total_samples) * n_samples)
+            X_for_svd = self._build_augmented(X, batch_mean, mean_delta, factor)
 
+        return X_for_svd, col_mean, col_var, n_total_samples
+
+    def _partial_fit(self, X):
+        first_pass = not hasattr(self, "components_")
         n_samples, n_features = X.shape
 
         if first_pass:
@@ -540,44 +563,12 @@ class IncrementalPCA:
         stats_dtype = (
             self.stats_dtype
             if self.stats_dtype is not None
-            else (torch.float32 if X.is_cuda else torch.float64)
+            else (X.dtype if X.is_cuda else torch.float64)
         )
 
-        col_mean, col_var, n_total_samples, batch_mean, _batch_var = (
-            self._incremental_mean_and_var(
-                X, self.mean_, self.var_, self.n_samples_seen_, stats_dtype=stats_dtype
-            )
+        X_for_svd, col_mean, col_var, n_total_samples = self._prepare_update(
+            X, stats_dtype, first_pass
         )
-
-        # Build the matrix to decompose:
-        if first_pass:
-            if self.copy:
-                # Center (out-of-place) to avoid modifying input; this is one pass.
-                X_for_svd = X - col_mean
-            else:
-                # In-place centering for performance when caller allows mutation.
-                X.sub_(col_mean)
-                X_for_svd = X
-        else:
-            # Mean correction term
-            factor = math.sqrt((self.n_samples_seen_ / n_total_samples) * n_samples)
-            mean_correction = (self.mean_ - batch_mean) * factor  # (D,)
-
-            k = self.n_components_
-            m = k + n_samples + 1
-
-            X_aug = self._get_x_aug_work(m, n_features, device=X.device, dtype=X.dtype)
-
-            # Top block: components_ * singular_values_ (fused into output)
-            torch.mul(self.components_, self.singular_values_[:, None], out=X_aug[:k])
-
-            # Middle block: centered batch written directly (no temp)
-            torch.sub(X, batch_mean, out=X_aug[k : k + n_samples])
-
-            # Last row: mean correction
-            X_aug[-1].copy_(mean_correction)
-
-            X_for_svd = X_aug
 
         # Decomposition (optionally with TF32)
         tail_ss = tail_count = None
@@ -589,11 +580,18 @@ class IncrementalPCA:
             else:
                 U, S, Vt = self._svd_fn_full(X_for_svd)
 
+        k = self.n_components_
+        components = Vt[:k].clone(memory_format=torch.contiguous_format)
         if self.deterministic_flip:
-            # Prefer u-based decision to avoid expensive argmax over D.
-            U, Vt = self._svd_flip(U, Vt, u_based_decision=True)
+            # Only retained vectors matter. U is read for the sign decision;
+            # the discarded left singular vectors need no in-place update.
+            U_k = U[:, :k]
+            rows = U_k.abs().argmax(dim=0)
+            signs = U_k[rows, torch.arange(k, device=X.device)].sign()
+            components.mul_(torch.where(signs == 0, 1, signs)[:, None])
 
-        S2 = S.square()
+        singular_values = S[:k].clone()
+        S2 = singular_values.square()
         denom = col_var.sum() * n_total_samples
 
         if n_total_samples > 1:
@@ -609,16 +607,17 @@ class IncrementalPCA:
         )
 
         self.n_samples_seen_ = n_total_samples
-        self.components_ = Vt[: self.n_components_]
-        self.singular_values_ = S[: self.n_components_]
+        self.components_ = components
+        self.singular_values_ = singular_values
         self.mean_ = col_mean
         self.var_ = col_var
         self.explained_variance_ = explained_variance[: self.n_components_]
         self.explained_variance_ratio_ = explained_variance_ratio[: self.n_components_]
 
-        # Precompute mean projection for transform (avoids allocating X-mean)
-        # shape: (k,)
-        self.mean_proj_ = self.mean_ @ self.components_.T
+        # Retain the projected mean for compatibility. Stable transform centers
+        # before multiplication instead of using this cache.
+        self.mean_proj_ = self.mean_.to(self.components_.dtype) @ self.components_.T
+        self._whitening_cache = None
 
         # noise variance
         discarded_count = min(X_for_svd.shape) - self.n_components_
@@ -628,7 +627,7 @@ class IncrementalPCA:
                 discarded_count = tail_count
             elif self.lowrank:
                 residual_ss = (
-                    X_for_svd.square().sum() - self.singular_values_.square().sum()
+                    torch.linalg.vector_norm(X_for_svd).square() - S2.sum()
                 ).clamp(min=0)
             else:
                 residual_ss = S[self.n_components_ :].square().sum()
@@ -640,25 +639,159 @@ class IncrementalPCA:
 
         return self
 
-    @torch.inference_mode()
-    def transform(self, X) -> torch.Tensor:
+    def _whitening_factors(self):
+        if self._whitening_cache is None:
+            std = (
+                self.explained_variance_.to(self.components_.dtype).clamp(min=0).sqrt()
+            )
+            keep = std > self.whiten_eps * std.max()
+            scale = torch.where(keep, std, 0)
+            inverse = torch.where(keep, torch.where(keep, std, 1).reciprocal(), 0)
+            self._whitening_cache = scale, inverse
+        return self._whitening_cache
+
+    @torch.no_grad()
+    def _project_batch(self, X, *, inverse=False, allow_transfer=False):
+        X = self._validate_transform(X, inverse=inverse, allow_transfer=allow_transfer)
+        with (
+            torch.autocast(device_type=X.device.type, enabled=False),
+            self._matmul_context(),
+        ):
+            if inverse:
+                scores = X * self._whitening_factors()[0] if self.whiten else X
+                result = scores @ self.components_
+                torch.add(result, self.mean_, out=result)
+            else:
+                # Subtract before the GEMM: subtracting a projected mean can
+                # catastrophically cancel for data with a large offset.
+                centered = torch.empty_like(X)
+                torch.sub(X, self.mean_, out=centered)
+                result = centered @ self.components_.mT
+                if self.whiten:
+                    result.mul_(self._whitening_factors()[1])
+        return result
+
+    def _transform_metadata(self, X, batch_size, inverse):
+        if not hasattr(self, "components_"):
+            raise ValueError("IncrementalPCA instance is not fitted yet.")
+        n, features = self._source_shape(X, allow_empty=True)
+        expected = self.n_components_ if inverse else self.n_features_
+        if features != expected:
+            raise ValueError(f"X has {features} features, but expected {expected}.")
+        if batch_size is None:
+            batch_size = getattr(self, "batch_size_", self.batch_size) or 1024
+        if not self._is_positive_integer(batch_size):
+            raise ValueError("batch_size must be a positive integer.")
+        return n, batch_size
+
+    def _output_device(self, output_device):
+        device = (
+            torch.device(output_device)
+            if output_device is not None
+            else self.components_.device
+        )
+        if device.type == "cpu":
+            return torch.device("cpu")
+        if device.type == "cuda" and device.index is None:
+            return torch.device("cuda", torch.cuda.current_device())
+        return device
+
+    def _projection_batches(self, X, batch_size, output_device, *, inverse=False):
+        n, batch_size = self._transform_metadata(X, batch_size, inverse)
+        device = self._output_device(output_device)
+        for batch in self.gen_batches(n, batch_size):
+            # The no-grad/autocast contexts end inside _project_batch, before
+            # yielding, so the caller's execution context is never changed.
+            yield self._project_batch(
+                X[batch], inverse=inverse, allow_transfer=True
+            ).to(device)
+
+    def transform_batches(
+        self, X, *, batch_size=None, output_device=None
+    ) -> Iterator[torch.Tensor]:
+        """Yield independently owned score batches, optionally transferred to CPU.
+
+        Both input conversion and output storage are bounded by a batch while
+        the consumer releases completed batches. Tensor sources may be on CPU
+        even when the model is on CUDA. Iteration uses the fitted basis; do not
+        call partial_fit while consuming the iterator.
         """
-        Applies dimensionality reduction to `X`.
+        return self._projection_batches(X, batch_size, output_device)
 
-        The input data `X` is projected on the first principal components previously
-        extracted from a training set.
+    def inverse_transform_batches(
+        self, X, *, batch_size=None, output_device=None
+    ) -> Iterator[torch.Tensor]:
+        """Yield reconstructed feature batches using the fitted basis."""
+        return self._projection_batches(X, batch_size, output_device, inverse=True)
 
-        Args:
-            X (torch.Tensor): New data tensor with shape (n_samples, n_features) to
-                be transformed.
+    @torch.no_grad()
+    def _transform_into(self, X, batch_size, output_device, out, *, inverse=False):
+        n, size = self._transform_metadata(X, batch_size, inverse)
+        width = self.n_features_ if inverse else self.n_components_
+        device = self._output_device(output_device)
+        if out is None and 0 < n <= size:
+            return self._project_batch(
+                X[:n], inverse=inverse, allow_transfer=batch_size is not None
+            ).to(device)
+        if out is None:
+            destination = torch.empty(
+                (n, width), device=device, dtype=self.components_.dtype
+            )
+            out = destination
+        else:
+            flags = getattr(out, "flags", None)
+            if flags is not None and not flags.writeable:
+                raise ValueError("out must be writable.")
+            destination = out if isinstance(out, torch.Tensor) else torch.as_tensor(out)
+            if (
+                destination.shape != (n, width)
+                or destination.dtype != self.components_.dtype
+            ):
+                raise ValueError(
+                    f"out must have shape {(n, width)} "
+                    f"and dtype {self.components_.dtype}."
+                )
+            if output_device is not None and destination.device != device:
+                raise ValueError("out and output_device must use the same device.")
+        for batch in self.gen_batches(n, size):
+            destination[batch].copy_(
+                self._project_batch(
+                    X[batch], inverse=inverse, allow_transfer=batch_size is not None
+                )
+            )
+        return out
 
-        Returns:
-            torch.Tensor: Transformed data tensor with shape (n_samples, n_components).
+    def transform(self, X, *, batch_size=None, output_device=None, out=None):
+        """Project in batches into one tensor or a supplied tensor/NumPy buffer.
+
+        Results default to the model device. ``output_device`` changes the
+        destination; ``out`` may also be a writable NumPy memmap. Use
+        ``transform_batches`` to avoid allocating the complete output.
+        The fitted mean is subtracted before multiplication for stability.
         """
-        X = self._validate_transform(X)
-        with self._matmul_context():
-            # Avoid allocating (X - mean) by using precomputed mean projection
-            return (X @ self.components_.T) - self.mean_proj_
+        return self._transform_into(X, batch_size, output_device, out)
+
+    def inverse_transform(self, X, *, batch_size=None, output_device=None, out=None):
+        """Reconstruct features, undoing whitening first when enabled."""
+        return self._transform_into(X, batch_size, output_device, out, inverse=True)
+
+    def fit_transform(
+        self, X, check_input=True, *, batch_size=None, output_device=None, out=None
+    ):
+        """Fit, then replay X using the final basis. X must be replayable.
+
+        The fitting pass preserves X even with ``copy=False``, so the second
+        pass sees the original data without needing a full dataset copy.
+        """
+        copy = self.copy
+        try:
+            self.copy = True
+            self.fit(X, check_input=check_input)
+        finally:
+            self.copy = copy
+        return self.transform(
+            X, batch_size=batch_size, output_device=output_device, out=out
+        )
 
     @staticmethod
     def gen_batches(n: int, batch_size: int, min_batch_size: int = 0):

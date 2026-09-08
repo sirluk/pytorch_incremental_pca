@@ -1,0 +1,460 @@
+{
+  "environment": {
+    "python": "3.13.15",
+    "torch": "2.14.0+cu130",
+    "cuda": "13.0",
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "precision": "highest",
+    "cpu_threads": 2,
+    "triton": "3.8.0"
+  },
+  "seed": 123,
+  "variants": [
+    "baseline",
+    "updated",
+    "triton_augmentation",
+    "triton_preprocessing",
+    "compiled_merge"
+  ],
+  "benchmark_sha256": "e814772b9bba701089dab1491a9c972bfc4183fcac576b89368b30a634403b60",
+  "shape": {
+    "features": 256,
+    "components": 16,
+    "batch_size": 64
+  },
+  "updates_per_round": 24,
+  "rounds": 5,
+  "current_source_sha256": "28b92cc6597db716c6d6d049f14bf77d1ff21afb4dc215353fed7ee03615b964",
+  "fit": [
+    {
+      "update_ms": 2.647688592939327,
+      "round_update_ms": [
+        2.66789342276752,
+        2.647688592939327,
+        2.6523297225746014,
+        2.6342853670939803,
+        2.6343004622807107
+      ],
+      "peak_extra_bytes": 3427840,
+      "component_storage_bytes": 82944,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 6.216764450073242e-05,
+      "backend": "full",
+      "revision": "baseline",
+      "mean_principal_cosine": 1.0,
+      "min_principal_cosine": 0.9999999999999997,
+      "relative_spectrum_error": 0.0
+    },
+    {
+      "update_ms": 2.6937324243287244,
+      "round_update_ms": [
+        2.7013340344031653,
+        2.6969902489023903,
+        2.6906869607046247,
+        2.6937324243287244,
+        2.693145206042876
+      ],
+      "peak_extra_bytes": 3424768,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 3.4689903259277344e-05,
+      "backend": "full",
+      "revision": "updated",
+      "mean_principal_cosine": 0.9999999999699496,
+      "min_principal_cosine": 0.9999999996039965,
+      "relative_spectrum_error": 8.469296517432667e-06
+    },
+    {
+      "update_ms": 2.7479083316090205,
+      "round_update_ms": [
+        2.766892333359768,
+        2.766751373807589,
+        2.747811124815295,
+        2.7435745772284768,
+        2.7479083316090205
+      ],
+      "peak_extra_bytes": 3424768,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 3.4689903259277344e-05,
+      "backend": "full",
+      "revision": "triton_augmentation",
+      "mean_principal_cosine": 0.9999999999699496,
+      "min_principal_cosine": 0.9999999996039965,
+      "relative_spectrum_error": 8.469296517432667e-06
+    },
+    {
+      "update_ms": 2.6836509738738337,
+      "round_update_ms": [
+        2.697921668489774,
+        2.6872860811029873,
+        2.6818011150074503,
+        2.6820318889804184,
+        2.6836509738738337
+      ],
+      "peak_extra_bytes": 3424768,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 3.4689903259277344e-05,
+      "backend": "full",
+      "revision": "triton_preprocessing",
+      "mean_principal_cosine": 0.9999999999699496,
+      "min_principal_cosine": 0.9999999996039965,
+      "relative_spectrum_error": 8.469296517432667e-06
+    },
+    {
+      "update_ms": 2.857511572074145,
+      "round_update_ms": [
+        2.8738437492089965,
+        2.8592871579652033,
+        2.8502659988589585,
+        2.857511572074145,
+        2.850875568886598
+      ],
+      "peak_extra_bytes": 3424768,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 4.184246063232422e-05,
+      "backend": "full",
+      "revision": "compiled_merge",
+      "mean_principal_cosine": 0.9999999999611181,
+      "min_principal_cosine": 0.9999999997132436,
+      "relative_spectrum_error": 7.328524588956498e-06
+    },
+    {
+      "update_ms": 1.6334621274533372,
+      "round_update_ms": [
+        1.64236103106911,
+        1.6333790457186599,
+        1.628758249959598,
+        1.6334621274533372,
+        1.6364205318192642
+      ],
+      "peak_extra_bytes": 650752,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 5.3738709539175034e-05,
+      "backend": "gram",
+      "revision": "baseline",
+      "mean_principal_cosine": 1.0,
+      "min_principal_cosine": 0.9999999999999998,
+      "relative_spectrum_error": 0.0
+    },
+    {
+      "update_ms": 1.807419874239713,
+      "round_update_ms": [
+        1.8202350474894047,
+        1.830920538244148,
+        1.806731374623875,
+        1.807419874239713,
+        1.8054629520823557
+      ],
+      "peak_extra_bytes": 647680,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 5.3851399570703506e-05,
+      "backend": "gram",
+      "revision": "updated",
+      "mean_principal_cosine": 0.9999999846382974,
+      "min_principal_cosine": 0.9999997866192621,
+      "relative_spectrum_error": 7.347543373725784e-07
+    },
+    {
+      "update_ms": 1.8516431252161663,
+      "round_update_ms": [
+        1.8607902068955202,
+        1.8646455331084628,
+        1.8516431252161663,
+        1.8470023836319645,
+        1.8504732094394665
+      ],
+      "peak_extra_bytes": 647680,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 5.3851399570703506e-05,
+      "backend": "gram",
+      "revision": "triton_augmentation",
+      "mean_principal_cosine": 0.9999999846382974,
+      "min_principal_cosine": 0.9999997866192621,
+      "relative_spectrum_error": 7.347543373725784e-07
+    },
+    {
+      "update_ms": 1.792741590179503,
+      "round_update_ms": [
+        1.7968497510689,
+        1.7897257154497008,
+        1.8011071564008792,
+        1.7898599229132135,
+        1.792741590179503
+      ],
+      "peak_extra_bytes": 647680,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 5.3851399570703506e-05,
+      "backend": "gram",
+      "revision": "triton_preprocessing",
+      "mean_principal_cosine": 0.9999999846382974,
+      "min_principal_cosine": 0.9999997866192621,
+      "relative_spectrum_error": 7.347543373725784e-07
+    },
+    {
+      "update_ms": 1.9308817572891712,
+      "round_update_ms": [
+        1.9380997982807457,
+        1.9336947007104754,
+        1.9308817572891712,
+        1.9270309518712263,
+        1.9203761282066505
+      ],
+      "peak_extra_bytes": 647680,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 5.358271300792694e-05,
+      "backend": "gram",
+      "revision": "compiled_merge",
+      "mean_principal_cosine": 0.999999964932581,
+      "min_principal_cosine": 0.9999994669363488,
+      "relative_spectrum_error": 4.38267989011365e-07
+    },
+    {
+      "update_ms": 3.298656413486848,
+      "round_update_ms": [
+        3.300620495186498,
+        3.2892108041172228,
+        3.299025547069808,
+        3.2968634041026235,
+        3.298656413486848
+      ],
+      "peak_extra_bytes": 3243520,
+      "component_storage_bytes": 32768,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 7.152557373046875e-07,
+      "backend": "lowrank",
+      "revision": "baseline",
+      "mean_principal_cosine": 1.0,
+      "min_principal_cosine": 0.9999999999999996,
+      "relative_spectrum_error": 0.0
+    },
+    {
+      "update_ms": 3.3742489176802337,
+      "round_update_ms": [
+        3.3808739584249756,
+        3.3954382524825633,
+        3.3682563225738704,
+        3.3742489176802337,
+        3.363487213694801
+      ],
+      "peak_extra_bytes": 3240448,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 8.344650268554688e-07,
+      "backend": "lowrank",
+      "revision": "updated",
+      "mean_principal_cosine": 0.9999999999970361,
+      "min_principal_cosine": 0.99999999996836,
+      "relative_spectrum_error": 1.7989133311857586e-06
+    },
+    {
+      "update_ms": 3.4047795343212783,
+      "round_update_ms": [
+        3.4047795343212783,
+        3.3967303849446275,
+        3.4057965773778656,
+        3.40106615719075,
+        3.4110895358026028
+      ],
+      "peak_extra_bytes": 3240448,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 8.344650268554688e-07,
+      "backend": "lowrank",
+      "revision": "triton_augmentation",
+      "mean_principal_cosine": 0.9999999999970361,
+      "min_principal_cosine": 0.99999999996836,
+      "relative_spectrum_error": 1.7989133311857586e-06
+    },
+    {
+      "update_ms": 3.3528945835617683,
+      "round_update_ms": [
+        3.413776750676334,
+        3.3496072088989117,
+        3.3528945835617683,
+        3.362645957774172,
+        3.346779577744504
+      ],
+      "peak_extra_bytes": 3240448,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 8.344650268554688e-07,
+      "backend": "lowrank",
+      "revision": "triton_preprocessing",
+      "mean_principal_cosine": 0.9999999999970361,
+      "min_principal_cosine": 0.99999999996836,
+      "relative_spectrum_error": 1.7989133311857586e-06
+    },
+    {
+      "update_ms": 3.484239374908308,
+      "round_update_ms": [
+        3.4855137928389013,
+        3.484239374908308,
+        3.473151591606438,
+        3.4871268823432424,
+        3.4685267989213266
+      ],
+      "peak_extra_bytes": 3240448,
+      "component_storage_bytes": 16384,
+      "component_logical_bytes": 16384,
+      "max_orthogonality_error": 9.5367431640625e-07,
+      "backend": "lowrank",
+      "revision": "compiled_merge",
+      "mean_principal_cosine": 0.9999999999964311,
+      "min_principal_cosine": 0.9999999999523277,
+      "relative_spectrum_error": 1.7787829165172298e-06
+    }
+  ],
+  "transform": [
+    {
+      "revision": "baseline",
+      "wall_us": 21.416866220533848,
+      "event_us": 21.39103889465332
+    },
+    {
+      "revision": "updated",
+      "wall_us": 37.93602576479316,
+      "event_us": 37.90463924407959
+    },
+    {
+      "revision": "triton_augmentation",
+      "wall_us": 38.0969955585897,
+      "event_us": 38.06432008743286
+    },
+    {
+      "revision": "triton_preprocessing",
+      "wall_us": 37.896435242146254,
+      "event_us": 37.86207914352417
+    },
+    {
+      "revision": "compiled_merge",
+      "wall_us": 38.0612863227725,
+      "event_us": 38.02815914154053
+    }
+  ],
+  "baseline_source_sha256": "621d699d631592d366b9d9be6254cf220cb29e47197c7ca41abece7e132b5517",
+  "experimental_kernels_sha256": "2fe4612bd0fd684866fe302fb092eaffaece33f5c264dca4512be17b7fb71fd5",
+  "triton_validation": [
+    {
+      "batch": 17,
+      "features": 37,
+      "components": 5,
+      "offset": 0,
+      "relative_error": 1.500982992421132e-07
+    },
+    {
+      "batch": 17,
+      "features": 37,
+      "components": 5,
+      "offset": 1000000.0,
+      "relative_error": 6.93988660848612e-08
+    },
+    {
+      "batch": 64,
+      "features": 256,
+      "components": 16,
+      "offset": 0,
+      "relative_error": 1.9236514712912188e-07
+    },
+    {
+      "batch": 64,
+      "features": 256,
+      "components": 16,
+      "offset": 1000000.0,
+      "relative_error": 8.501771515860403e-08
+    },
+    {
+      "batch": 500,
+      "features": 2000,
+      "components": 100,
+      "offset": 0,
+      "relative_error": 2.24119338840973e-07
+    },
+    {
+      "batch": 500,
+      "features": 2000,
+      "components": 100,
+      "offset": 1000000.0,
+      "relative_error": 1.3172543244744502e-07
+    }
+  ],
+  "augmentation_microbenchmark": {
+    "torch": {
+      "wall_us": 24.803720880299807,
+      "event_us": 24.775519371032715
+    },
+    "triton": {
+      "wall_us": 13.839430175721645,
+      "event_us": 13.808319568634033
+    }
+  },
+  "centered_transform_microbenchmark": {
+    "torch": {
+      "wall_us": 17.580369021743536,
+      "event_us": 17.548799514770508
+    },
+    "triton_tf32x3": {
+      "wall_us": 18.04362516850233,
+      "event_us": 18.031200170516968
+    }
+  },
+  "fit_input_memory": [
+    {
+      "revision": "baseline",
+      "source_shape": [
+        4096,
+        512
+      ],
+      "source_dtype": "float16",
+      "source_contiguous": false,
+      "peak_extra_bytes": 12582912
+    },
+    {
+      "revision": "updated",
+      "source_shape": [
+        4096,
+        512
+      ],
+      "source_dtype": "float16",
+      "source_contiguous": false,
+      "peak_extra_bytes": 1734656
+    },
+    {
+      "revision": "triton_augmentation",
+      "source_shape": [
+        4096,
+        512
+      ],
+      "source_dtype": "float16",
+      "source_contiguous": false,
+      "peak_extra_bytes": 1734656
+    },
+    {
+      "revision": "triton_preprocessing",
+      "source_shape": [
+        4096,
+        512
+      ],
+      "source_dtype": "float16",
+      "source_contiguous": false,
+      "peak_extra_bytes": 1734656
+    },
+    {
+      "revision": "compiled_merge",
+      "source_shape": [
+        4096,
+        512
+      ],
+      "source_dtype": "float16",
+      "source_contiguous": false,
+      "peak_extra_bytes": 1734656
+    }
+  ]
+}

@@ -26,7 +26,9 @@ def subspace_similarity(components_a, components_b):
     1.0 = identical.
     """
     k = components_a.shape[0]
-    overlap = components_a @ components_b.T
+    a = torch.linalg.qr(components_a.T).Q
+    b = torch.linalg.qr(components_b.T).Q
+    overlap = a.T @ b
     return (torch.linalg.svdvals(overlap).sum() / k).item()
 
 
@@ -170,21 +172,21 @@ def main():
 
     # Warmup
     for _ in range(5):
-        ipca_full._svd_fn_full(X_test.clone())
-        ipca_gram._svd_fn_gram_topk(X_test.clone())
+        ipca_full._svd_fn_full(X_test)
+        ipca_gram._svd_fn_gram_topk(X_test)
     torch.cuda.synchronize()
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(n_reps):
-        ipca_full._svd_fn_full(X_test.clone())
+        ipca_full._svd_fn_full(X_test)
     torch.cuda.synchronize()
     t_full = time.perf_counter() - t0
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(n_reps):
-        ipca_gram._svd_fn_gram_topk(X_test.clone())
+        ipca_gram._svd_fn_gram_topk(X_test)
     torch.cuda.synchronize()
     t_gram = time.perf_counter() - t0
 
