@@ -1,11 +1,27 @@
-# PyTorch Incremental PCA
+# Incremental PCA on GPU with PyTorch
 
 [![PyPI Version](https://img.shields.io/pypi/v/torch-incremental-pca.svg)](https://pypi.org/project/torch-incremental-pca/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-torch-incremental-pca implements incremental principal component analysis with
-PyTorch on CPU and CUDA. It summarizes earlier batches using retained principal
-components, then updates those components from each new batch.
+`torch-incremental-pca` implements incremental principal component analysis
+(incremental PCA) with PyTorch on CUDA GPUs and on CPU. It summarizes earlier
+batches using retained principal components, then updates those components from
+each new batch, so a dataset larger than GPU or host memory can be fitted one
+batch at a time.
+
+- **GPU-accelerated.** Fitting and projection run on CUDA. `compute_device="cuda"`
+  fits CPU- or disk-backed data on a GPU without loading the whole dataset there.
+- **Out-of-core.** Accepts tensors, NumPy arrays and memory maps, lazy arrays, or
+  a stream of `partial_fit` batches from a `DataLoader`.
+- **scikit-learn-style API.** `fit`, `partial_fit`, `transform`, `fit_transform`,
+  and `inverse_transform`, plus `components_`, `explained_variance_ratio_`,
+  `singular_values_`, and the other familiar attributes. The update follows
+  scikit-learn's augmented-matrix incremental SVD.
+- **Bounded memory for dimensionality reduction.** Batched projection writes into
+  a tensor, NumPy array, or memory map, or streams batches through an iterator.
+- **Choice of SVD backend.** Full `torch.linalg.svd` with CUDA driver selection,
+  randomized `svd_lowrank`, or a Gram-matrix eigensolve with a full-SVD fallback.
+- **Float32 and float64**, optional whitening, and float64 running statistics.
 
 ## Installation
 
@@ -223,6 +239,41 @@ disk I/O or CPU-to-GPU transfer throughput.
 
 See [the H100 benchmark report](benchmarks/results/README.md) for measured
 tradeoffs, correctness coverage, source hashes, and reproduction commands.
+
+## FAQ
+
+### How do I run PCA on a GPU in PyTorch?
+
+Construct `IncrementalPCA(compute_device="cuda")` and call `fit`, or pass CUDA
+tensors to `partial_fit`. Fitting, projection, and reconstruction then run on the
+GPU. See [Fit tensors, arrays, and memory maps](#fit-tensors-arrays-and-memory-maps).
+
+### Can I fit PCA on a dataset larger than memory?
+
+Yes. Only one batch is converted and transferred at a time, so resident input
+storage is bounded by the batch size, in addition to the model and decomposition
+workspace. Fit from a NumPy memory map, a lazy array, or a stream of
+`partial_fit` batches.
+
+### Is this a drop-in replacement for scikit-learn's IncrementalPCA?
+
+The method names, learned attributes, and numerical update match, so most
+scikit-learn code ports directly and results are close. They are not identical:
+incremental truncation makes results depend on batch size and ordering, and this
+class adds parameters scikit-learn does not have, such as `compute_device`, SVD
+backend selection, and `stats_dtype`.
+
+### Does it work without a GPU?
+
+Yes. CPU is fully supported, and `compute_device=None` follows the device of the
+first input batch.
+
+### When is incremental PCA preferable to a single full SVD?
+
+Use it when the data does not fit in memory, when it arrives as a stream, or when
+an existing basis should be updated with new batches. For data that fits in
+memory, a single `torch.linalg.svd` or `torch.pca_lowrank` pass is simpler and
+exact.
 
 ## Acknowledgments
 
